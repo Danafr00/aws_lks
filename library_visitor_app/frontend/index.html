@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Library Visitor</title>
+</head>
+
+<body>
+
+<h2>Perpustakaan Sekolah</h2>
+
+<form id="visitorForm">
+
+<label>Nama</label><br>
+<input type="text" id="name"><br><br>
+
+<label>Kelas</label><br>
+<input type="text" id="class"><br><br>
+
+<label>Tujuan</label><br>
+<input type="text" id="purpose"><br><br>
+
+<button type="submit">Submit</button>
+
+</form>
+
+<p id="message"></p>
+
+<script>
+
+const API_URL = "YOUR_API_URL";
+
+document.getElementById("visitorForm").addEventListener("submit", async function(e){
+
+e.preventDefault();
+
+const data = {
+    name: document.getElementById("name").value,
+    class: document.getElementById("class").value,
+    purpose: document.getElementById("purpose").value
+}
+
+const response = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+        "Content-Type":"application/json"
+    },
+    body: JSON.stringify(data)
+})
+
+const result = await response.json()
+
+document.getElementById("message").innerText = result.message
+
+})
+
+</script>
+
+</body>
+</html>

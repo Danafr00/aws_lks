@@ -1,0 +1,28 @@
+{
+  "StartAt": "ScaleOut",
+  "States": {
+    "ScaleOut": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:updateAutoScalingGroup",
+      "Parameters": {
+        "AutoScalingGroupName": "worker-asg",
+        "DesiredCapacity": 2
+      },
+      "Next": "WaitProcessing"
+    },
+    "WaitProcessing": {
+      "Type": "Wait",
+      "Seconds": 120,
+      "Next": "ScaleIn"
+    },
+    "ScaleIn": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:autoscaling:updateAutoScalingGroup",
+      "Parameters": {
+        "AutoScalingGroupName": "worker-asg",
+        "DesiredCapacity": 0
+      },
+      "End": true
+    }
+  }
+}
