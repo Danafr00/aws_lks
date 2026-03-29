@@ -34,52 +34,6 @@ Participants must:
 
 ---
 
-# 📁 LOCAL PROJECT STRUCTURE
-
-```bash
-lks-ec2-batch-processing/
-│
-├── frontend/
-│   └── index.html
-│
-├── ec2/
-│   └── process.py
-│
-├── stepfunctions/
-│   └── state_machine.json
-│
-├── database/
-│   └── schema.sql
-│
-└── sample-data/
-    └── scores.csv
-```
-
----
-
-# 🚀 LKS Cloud Computing 2026
-
-## Batch Student Score Processing System (EC2 + Auto Scaling + Step Functions)
-
----
-
-## 📌 Overview
-
-This project implements a **cloud-based batch processing system** for student exam scores using AWS services.
-
-The system is designed with a **scalable, event-driven architecture** using:
-
-* Amazon S3 (file storage)
-* Amazon EC2 (processing engine)
-* Auto Scaling Group (compute scaling)
-* AWS Step Functions (orchestration)
-* Amazon EventBridge (event trigger)
-* Amazon RDS (database)
-* AWS Amplify (frontend)
-* AWS Backup (data protection)
-
----
-
 ## 🧠 Architecture Diagram
 
 ```mermaid
@@ -297,18 +251,3 @@ sample-data/scores.csv
 * ASG scales back to 0
 
 ---
-
-# 🧪 END-TO-END FLOW
-
-```text
-User uploads CSV
-→ S3
-→ EventBridge triggered
-→ Step Functions starts
-→ ASG scale out
-→ EC2 instances launch
-→ process.py runs automatically
-→ Data inserted into RDS
-→ EC2 shuts down
-→ Step Functions scale in
-```
