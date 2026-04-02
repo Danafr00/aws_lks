@@ -82,7 +82,7 @@ incident-system/
 ├── stepfunctions/
 │   └── state_machine.json
 │
-└── sample-event.json
+└── sample_event.json
 ```
 
 ---
@@ -183,6 +183,28 @@ DynamoDBFullAccess
 
 ---
 
+### 4.5️⃣ Create IAM Role for Step Functions
+
+* Create a new IAM role with trust policy for `states.amazonaws.com`
+* Attach inline policy:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "lambda:InvokeFunction",
+  "Resource": [
+    "arn:aws:lambda:REGION:ACCOUNT_ID:function:read_s3",
+    "arn:aws:lambda:REGION:ACCOUNT_ID:function:alert",
+    "arn:aws:lambda:REGION:ACCOUNT_ID:function:log",
+    "arn:aws:lambda:REGION:ACCOUNT_ID:function:save"
+  ]
+}
+```
+
+* Attach this role when creating the Step Functions state machine
+
+---
+
 ### 5️⃣ Create API Gateway
 
 * HTTP API
@@ -231,6 +253,18 @@ Target:
 Step Functions
 ```
 
+Create a new IAM role for EventBridge with permission to start the state machine:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "states:StartExecution",
+  "Resource": "arn:aws:states:REGION:ACCOUNT_ID:stateMachine:YOUR_STATE_MACHINE_NAME"
+}
+```
+
+Attach this role to the EventBridge rule target.
+
 ---
 
 ### 8️⃣ Deploy Frontend
@@ -244,7 +278,7 @@ Step Functions
 
 Upload:
 
-sample_event.json
+`sample_event.json`
 
 ---
 
