@@ -1,0 +1,36 @@
+{
+  "StartAt": "ReadFromS3",
+  "States": {
+    "ReadFromS3": {
+      "Type": "Task",
+      "Resource": "LAMBDA_READ_S3",
+      "Next": "CheckSeverity"
+    },
+    "CheckSeverity": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.severity",
+          "StringEquals": "HIGH",
+          "Next": "SendAlert"
+        }
+      ],
+      "Default": "LogOnly"
+    },
+    "SendAlert": {
+      "Type": "Task",
+      "Resource": "LAMBDA_ALERT",
+      "Next": "SaveResult"
+    },
+    "LogOnly": {
+      "Type": "Task",
+      "Resource": "LAMBDA_LOG",
+      "Next": "SaveResult"
+    },
+    "SaveResult": {
+      "Type": "Task",
+      "Resource": "LAMBDA_SAVE",
+      "End": true
+    }
+  }
+}

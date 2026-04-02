@@ -1,0 +1,5 @@
+{
+  "id": "evt-001",
+  "message": "CPU usage high",
+  "severity": "HIGH"
+}

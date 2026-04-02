@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<h2>Upload Incident JSON</h2>
+
+<input type="file" id="file">
+<button onclick="upload()">Upload</button>
+
+<script>
+
+const API_URL = "YOUR_API_GATEWAY_URL";
+
+async function upload(){
+
+ const res = await fetch(API_URL);
+ const data = await res.json();
+
+ const file = document.getElementById("file").files[0];
+
+ await fetch(data.upload_url, {
+   method: "PUT",
+   headers: {
+     "Content-Type": "application/json"
+   },
+   body: file
+ });
+
+ alert("Uploaded!");
+}
+
+</script>
+
+</body>
+</html>
