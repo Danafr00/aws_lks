@@ -1,8 +1,13 @@
 import boto3
 import json
 import uuid
+from botocore.config import Config
 
-s3 = boto3.client('s3')
+s3 = boto3.client(
+    's3',
+    region_name='ap-southeast-1',
+    config=Config(signature_version='s3v4')
+)
 
 BUCKET = "incident-input-bucket"
 

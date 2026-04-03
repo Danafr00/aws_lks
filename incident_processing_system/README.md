@@ -151,6 +151,31 @@ Enable:
 Send notifications to EventBridge
 ```
 
+**Disable Block Public Access** on `incident-input-bucket`:
+
+```
+S3 → incident-input-bucket → Permissions → Block public access → Edit → Uncheck all → Save
+```
+
+**Add CORS policy** on `incident-input-bucket`:
+
+```
+S3 → incident-input-bucket → Permissions → Cross-origin resource sharing (CORS) → Edit
+```
+
+Paste:
+
+```json
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["PUT", "OPTIONS"],
+    "AllowedOrigins": ["*"],
+    "ExposeHeaders": []
+  }
+]
+```
+
 ---
 
 ### 2️⃣ Create DynamoDB
@@ -220,7 +245,13 @@ GET /generate-url
 Lambda → generate_url
 ```
 
-Enable CORS
+**Enable CORS** with these values:
+
+```
+Access-Control-Allow-Origin:  *
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Methods: GET, OPTIONS
+```
 
 ---
 
@@ -303,6 +334,8 @@ Upload file
 * Wrong bucket name in rule
 * Lambda missing permissions
 * Invalid JSON format
+* CORS error on S3 PUT — presigned URL uses wrong endpoint: make sure `generate_url.py` uses `signature_version='s3v4'` and the correct `region_name`, otherwise boto3 generates a SigV2 URL pointing to `s3.amazonaws.com` instead of the regional endpoint and the browser preflight fails
+* CORS error on S3 PUT — missing S3 CORS policy: add the CORS config to `incident-input-bucket` as shown in Step 1
 
 ---
 
