@@ -1,0 +1,601 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  LKS Challenge - Serverless + VPC + RDS Architecture
+  VPC with public/private subnets, RDS in private subnet,
+  Lambda in VPC, Bastion Host, and API Gateway.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: lks-app
+    Description: Prefix for all resource names
+
+  DBName:
+    Type: String
+    Default: lksdb
+    Description: RDS Database name
+
+  DBUsername:
+    Type: String
+    Default: admin
+    Description: RDS master username
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: RDS master password (min 8 chars)
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+
+  BastionKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access to Bastion Host
+
+  BastionAllowedCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH into Bastion (restrict in prod!)
+
+# ─────────────────────────────────────────────
+#  MAPPINGS
+# ─────────────────────────────────────────────
+Mappings:
+  AZConfig:
+    us-east-1:
+      AZ1: us-east-1a
+      AZ2: us-east-1b
+    ap-southeast-1:
+      AZ1: ap-southeast-1a
+      AZ2: ap-southeast-1b
+    ap-southeast-3:
+      AZ1: ap-southeast-3a
+      AZ2: ap-southeast-3b
+
+# ─────────────────────────────────────────────
+#  RESOURCES
+# ─────────────────────────────────────────────
+Resources:
+
+  # ── VPC ────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── PUBLIC SUBNETS (Bastion + NAT GW) ──────
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+
+  # ── PRIVATE SUBNETS (Lambda + RDS) ─────────
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-2"
+
+  # ── NAT GATEWAY (Lambda → internet egress) ──
+  EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat"
+
+  # ── ROUTE TABLES ───────────────────────────
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-rt"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ─────────────────────────────────────────────
+  #  SECURITY GROUPS
+  # ─────────────────────────────────────────────
+
+  # Bastion: SSH from allowed CIDR only
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion Host - SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref BastionAllowedCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-bastion-sg"
+
+  # Lambda: no inbound, outbound to RDS and internet
+  LambdaSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda function security group
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-lambda-sg"
+
+  # RDS: only from Lambda SG and Bastion SG
+  RDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS - allow from Lambda and Bastion only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSG
+          Description: From Lambda
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BastionSG
+          Description: From Bastion (for admin/debug)
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-sg"
+
+  # Allow Lambda SG to reach RDS SG on port 3306
+  LambdaToRDSEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSG
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      DestinationSecurityGroupId: !Ref RDSSG
+      Description: Lambda to RDS MySQL
+
+  # Allow Lambda SG to reach internet (via NAT GW) for AWS SDK calls
+  LambdaHttpsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSG
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+      Description: Lambda outbound HTTPS (Secrets Manager, etc.)
+
+  # ─────────────────────────────────────────────
+  #  RDS
+  # ─────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db-subnet-group"
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete  # Change to Snapshot in production
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: "20"
+      StorageType: gp2
+      MultiAZ: false
+      PubliclyAccessible: false          # ← KEY: no public access
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSG
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds"
+
+  # ─────────────────────────────────────────────
+  #  SECRETS MANAGER (store DB creds securely)
+  # ─────────────────────────────────────────────
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/db-credentials"
+      Description: RDS credentials for Lambda
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${RDSInstance.Endpoint.Address}",
+          "port": "3306",
+          "dbname": "${DBName}"
+        }
+
+  # ─────────────────────────────────────────────
+  #  IAM – Lambda Execution Role
+  # ─────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+
+  # ─────────────────────────────────────────────
+  #  LAMBDA FUNCTION
+  # ─────────────────────────────────────────────
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-handler"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSG
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref DBSecret
+          DB_NAME: !Ref DBName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import pymysql
+          import os
+
+          secrets_client = boto3.client("secretsmanager")
+          _conn = None
+
+          def get_connection():
+              global _conn
+              if _conn and _conn.open:
+                  return _conn
+              secret = json.loads(
+                  secrets_client.get_secret_value(
+                      SecretId=os.environ["SECRET_ARN"]
+                  )["SecretString"]
+              )
+              _conn = pymysql.connect(
+                  host=secret["host"],
+                  user=secret["username"],
+                  password=secret["password"],
+                  database=secret["dbname"],
+                  port=int(secret["port"]),
+                  connect_timeout=5,
+                  cursorclass=pymysql.cursors.DictCursor,
+              )
+              return _conn
+
+          def handler(event, context):
+              method = event.get("httpMethod", "GET")
+              path   = event.get("path", "/")
+              body   = json.loads(event.get("body") or "{}")
+
+              conn = get_connection()
+
+              # Bootstrap table on first run
+              with conn.cursor() as cur:
+                  cur.execute("""
+                      CREATE TABLE IF NOT EXISTS items (
+                          id    INT AUTO_INCREMENT PRIMARY KEY,
+                          name  VARCHAR(255) NOT NULL,
+                          value TEXT
+                      )
+                  """)
+                  conn.commit()
+
+              # CRUD routing
+              if method == "GET" and path == "/items":
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT * FROM items")
+                      rows = cur.fetchall()
+                  return resp(200, rows)
+
+              if method == "POST" and path == "/items":
+                  with conn.cursor() as cur:
+                      cur.execute(
+                          "INSERT INTO items (name, value) VALUES (%s, %s)",
+                          (body.get("name"), body.get("value")),
+                      )
+                      conn.commit()
+                      item_id = cur.lastrowid
+                  return resp(201, {"id": item_id})
+
+              if method == "DELETE":
+                  item_id = event.get("pathParameters", {}).get("id")
+                  with conn.cursor() as cur:
+                      cur.execute("DELETE FROM items WHERE id=%s", (item_id,))
+                      conn.commit()
+                  return resp(200, {"deleted": item_id})
+
+              return resp(404, {"error": "route not found"})
+
+          def resp(status, body):
+              return {
+                  "statusCode": status,
+                  "headers": {"Content-Type": "application/json"},
+                  "body": json.dumps(body, default=str),
+              }
+
+  # ─────────────────────────────────────────────
+  #  API GATEWAY
+  # ─────────────────────────────────────────────
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      Description: LKS serverless API
+
+  # /items resource
+  ItemsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: items
+
+  # /items/{id} resource
+  ItemResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ItemsResource
+      PathPart: "{id}"
+
+  # GET /items
+  GetItemsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations"
+          - Arn: !GetAtt LambdaFunction.Arn
+
+  # POST /items
+  PostItemsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ItemsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations"
+          - Arn: !GetAtt LambdaFunction.Arn
+
+  # DELETE /items/{id}
+  DeleteItemMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ItemResource
+      HttpMethod: DELETE
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Arn}/invocations"
+          - Arn: !GetAtt LambdaFunction.Arn
+
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - GetItemsMethod
+      - PostItemsMethod
+      - DeleteItemMethod
+    Properties:
+      RestApiId: !Ref RestApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+
+  # ─────────────────────────────────────────────
+  #  BASTION HOST
+  # ─────────────────────────────────────────────
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+      KeyName: !Ref BastionKeyName
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref BastionSG
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-bastion"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y mysql
+          echo "Bastion ready. Connect to RDS at: ${RDSInstance.Endpoint.Address}" > /home/ec2-user/rds-endpoint.txt
+          chown ec2-user:ec2-user /home/ec2-user/rds-endpoint.txt
+
+# ─────────────────────────────────────────────
+#  OUTPUTS
+# ─────────────────────────────────────────────
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Export:
+      Name: !Sub "${ProjectName}-api-url"
+
+  RDSEndpoint:
+    Description: RDS endpoint (private - use Bastion to reach)
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${ProjectName}-rds-endpoint"
+
+  BastionPublicIP:
+    Description: Bastion Host public IP for SSH tunneling
+    Value: !GetAtt BastionInstance.PublicIp
+    Export:
+      Name: !Sub "${ProjectName}-bastion-ip"
+
+  SecretARN:
+    Description: Secrets Manager ARN for DB credentials
+    Value: !Ref DBSecret
