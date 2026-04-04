@@ -78,7 +78,7 @@ library_visitor_app/
 
 2. Create database:
 
-   * Engine: PostgreSQL
+   * Engine: MySQL
    * Template: Free Tier
    * Instance: db.t3.micro
 
@@ -89,7 +89,7 @@ library_visitor_app/
 4. Configure Security Group:
 
    ```
-   Port: 5432
+   Port: 3306
    Source: 0.0.0.0/0 (for testing only)
    ```
 
@@ -101,17 +101,17 @@ Run SQL:
 
 ```sql
 CREATE TABLE visitors (
- id SERIAL PRIMARY KEY,
- name TEXT,
- class TEXT,
- purpose TEXT,
- visit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100),
+    class VARCHAR(20),
+    purpose VARCHAR(255),
+    visit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE daily_summary (
- id SERIAL PRIMARY KEY,
- date DATE,
- total_visitors INT
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    date DATE,
+    total_visitors INT
 );
 ```
 
@@ -132,12 +132,12 @@ Python 3.11
 
 ---
 
-### 4️⃣ Install Dependencies (psycopg2)
+### 4️⃣ Install Dependencies (pymysql)
 
-Lambda requires PostgreSQL driver:
+Lambda requires MySQL driver:
 
 ```bash
-pip install psycopg2-binary -t .
+pip install pymysql -t .
 zip -r function.zip .
 ```
 
@@ -151,7 +151,7 @@ In Lambda:
 
 ```
 DB_HOST=your-rds-endpoint
-DB_NAME=postgres
+DB_NAME=your-database-name
 DB_USER=admin
 DB_PASS=password123
 ```

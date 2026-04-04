@@ -1,5 +1,5 @@
 CREATE TABLE visitors (
-    id SERIAL PRIMARY KEY,
+    id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100),
     class VARCHAR(20),
     purpose VARCHAR(255),
@@ -7,7 +7,7 @@ CREATE TABLE visitors (
 );
 
 CREATE TABLE daily_summary (
-    id SERIAL PRIMARY KEY,
+    id INT AUTO_INCREMENT PRIMARY KEY,
     date DATE,
     total_visitors INT
 );
