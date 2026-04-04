@@ -10,84 +10,50 @@ Users upload reports via a web frontend. The system automatically validates, pro
 
 ```mermaid
 flowchart TD
-    Dev(["GitHub\n(Python Source)"])
-    Postman(["Postman\n(API Testing)"])
+    User(["User"])
+    Postman(["Postman / API"])
 
-    subgraph FRONTEND["Front-end"]
-        Amplify["AWS Amplify\n(Web App)"]
-    end
-
-    subgraph API["API Layer"]
-        APIGW["API Gateway\n(REST)"]
+    subgraph SERVERLESS["Serverless & Storage"]
+        Amplify["AWS Amplify\n(Web frontend)"]
+        APIGW["API Gateway\n(REST endpoints)"]
+        S3["S3 Bucket\n(Report uploads)"]
+        EB["EventBridge\n(S3 upload rule)"]
+        SF["Step Functions\n(Orchestrator)"]
+        L1["Lambda — Validate\n(Format check)"]
+        L2["Lambda — Process\n(Writes to RDS)"]
+        L3["Lambda — Notify\n(Publishes to SNS)"]
+        SNS["SNS\n(Email / SMS)"]
     end
 
     subgraph VPC["VPC — 10.0.0.0/16"]
-        subgraph PUB["Public Subnets"]
-            ALB["Application Load Balancer"]
-            Bastion["Bastion Host"]
-            NAT["NAT Gateway"]
+        subgraph PUB["Public Subnet"]
+            ALB["ALB\n(Load balancer)"]
+            NAT["NAT Gateway\n(Outbound traffic)"]
         end
 
-        subgraph PRIV["Private Subnets"]
-            ASG["EC2 Auto Scaling Group\n(Admin Dashboard)"]
-            RDS[("RDS MySQL\n(Private — no public access)")]
+        subgraph PRIV["Private Subnet"]
+            ASG["EC2 / ASG\n(Admin dashboard)"]
+            RDS[("RDS MySQL\n(Report metadata)")]
         end
     end
 
-    subgraph STORAGE["Storage"]
-        S3["S3 Bucket\n(Report Uploads)"]
-        Glacier["S3 Glacier\n(Auto-archived after 90d)"]
-        Backup["AWS Backup\n(RDS daily snapshots)"]
-    end
-
-    subgraph AUTOMATION["Serverless Automation"]
-        EB["EventBridge\n(S3 upload rule)"]
-        SF["Step Functions\n(Orchestrator)"]
-        L1["Lambda — Validate"]
-        L2["Lambda — Process & Save to RDS"]
-        L3["Lambda — Send Notification"]
-    end
-
-    subgraph NOTIFY["Notification"]
-        SNS["SNS Topic\n(Email / SMS)"]
-    end
-
-    subgraph OPS["Monitoring & Governance"]
-        CW["CloudWatch\n(Logs, Alarms, Dashboard)"]
-        IAM["IAM\n(Roles & Policies)"]
-    end
-
-    Dev -->|"push code"| Amplify
-    Postman -->|"HTTP requests"| APIGW
-    Amplify -->|"upload report"| S3
-    APIGW -->|"Lambda proxy"| L2
-
-    S3 -->|"s3:ObjectCreated event"| EB
+    User -->|"upload"| Amplify
+    Postman -->|"HTTP"| APIGW
+    Amplify -->|"upload"| S3
+    S3 -->|"ObjectCreated"| EB
     EB -->|"trigger"| SF
-    SF --> L1
-    L1 -->|"valid"| L2
-    L2 -->|"write metadata"| RDS
-    L2 --> L3
-    L3 --> SNS
-    SNS -->|"email/SMS"| Dev
+    APIGW -.->|"proxy"| SF
 
-    S3 -.->|"lifecycle rule 90d"| Glacier
-    Backup -.->|"daily backup"| RDS
+    SF --> L1
+    SF --> L2
+    SF --> L3
+    L3 --> SNS
+
+    L2 -.->|"VPC Lambda write"| RDS
 
     ALB --> ASG
     ASG --> RDS
-    Bastion -->|"SSH tunnel"| RDS
-    ASG -->|"outbound via"| NAT
-
-    L2 -->|"VPC Lambda"| RDS
-
-    CW -.->|"monitors"| SF
-    CW -.->|"monitors"| L1
-    CW -.->|"monitors"| L2
-    CW -.->|"monitors"| ASG
-    IAM -.->|"controls access"| L1
-    IAM -.->|"controls access"| L2
-    IAM -.->|"controls access"| L3
+    ASG -->|"outbound"| NAT
 ```
 
 ---

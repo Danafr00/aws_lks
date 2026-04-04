@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Serverless Automation Platform — Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f5f6fa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+      color: #232f3e;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #232f3e;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 32px;
+    }
+
+    .diagram-wrapper {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.09);
+      padding: 32px 40px;
+      max-width: 900px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Serverless Automation Platform</h1>
+  <p class="subtitle">LKS — Serverless &amp; Automation Track &nbsp;|&nbsp; AWS Architecture</p>
+
+  <div class="diagram-wrapper">
+    <div class="mermaid">
+flowchart TD
+    User(["👤 User"])
+    Postman(["🧪 Postman / API"])
+
+    subgraph SERVERLESS["Serverless & Storage"]
+        Amplify["📱 AWS Amplify\n(Web frontend)"]
+        APIGW["🔌 API Gateway\n(REST endpoints)"]
+        S3["🪣 S3 Bucket\n(Report uploads)"]
+        EB["🚌 EventBridge\n(S3 upload rule)"]
+        SF["🔀 Step Functions\n(Orchestrator)"]
+        L1["λ Validate\n(Format check)"]
+        L2["λ Process\n(Writes to RDS)"]
+        L3["λ Notify\n(Publishes to SNS)"]
+        SNS["🔔 SNS\n(Email / SMS)"]
+    end
+
+    subgraph VPC["🔒 VPC — 10.0.0.0/16"]
+        subgraph PUB["☀️ Public Subnet"]
+            ALB["⚖️ ALB\n(Load balancer)"]
+            Bastion["🖥️ Bastion Host\n(SSH access)"]
+            NAT["🌍 NAT Gateway\n(Outbound traffic)"]
+        end
+
+        subgraph PRIV["🔐 Private Subnet"]
+            ASG["🖥️ EC2 / ASG\n(Admin dashboard)"]
+            RDS[("🗃️ RDS MySQL\n(Report metadata)")]
+        end
+    end
+
+    subgraph OPS["📊 Monitoring"]
+        CW["📈 CloudWatch\n(Logs & Alarms)"]
+    end
+
+    User -->|"upload"| Amplify
+    Postman -->|"HTTP"| APIGW
+    Amplify -->|"store file"| S3
+    S3 -->|"ObjectCreated"| EB
+    EB -->|"trigger"| SF
+    APIGW -.->|"proxy"| SF
+
+    SF --> L1
+    SF --> L2
+    SF --> L3
+    L3 --> SNS
+
+    L2 -.->|"VPC Lambda\nTCP:3306"| RDS
+
+    ALB --> ASG
+    ASG --> RDS
+    ASG -->|"outbound"| NAT
+    Bastion -->|"TCP:3306"| RDS
+
+    SF -.->|"logs"| CW
+    L1 -.->|"logs"| CW
+    L2 -.->|"logs"| CW
+    ASG -.->|"metrics"| CW
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'default',
+      flowchart: { curve: 'basis', padding: 20 },
+      themeVariables: {
+        primaryColor: '#f0f7ff',
+        primaryBorderColor: '#4a90d9',
+        secondaryColor: '#eafaf1',
+        tertiaryColor: '#fef9e7',
+        fontFamily: 'Segoe UI, Arial, sans-serif',
+        fontSize: '14px'
+      }
+    });
+  </script>
+
+</body>
+</html>
