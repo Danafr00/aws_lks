@@ -1,0 +1,74 @@
+# Copy to terraform.tfvars and fill in your values.
+# terraform.tfvars is git-ignored – never commit secrets.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  FREE TIER MODE (all expensive features disabled)                       │
+# │  Estimated cost: ~$0–5/month (only NAT Gateway is not free)             │
+# │                                                                         │
+# │  To enable paid features for LKS extra points, change the flags below  │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+aws_region   = "ap-southeast-1"
+project_name = "lks-app"
+environment  = "production"
+
+# ─── Networking ───────────────────────────────────────────────────────────────
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["ap-southeast-1a", "ap-southeast-1b"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
+db_subnet_cidrs      = ["10.0.21.0/24", "10.0.22.0/24"]
+
+# FREE TIER: true (1 NAT GW, ~$32/month)
+# FULL HA:   false (2 NAT GW, ~$65/month)
+# NOTE: NAT Gateway is NEVER free tier regardless.
+single_nat_gateway = true
+
+# ─── Compute (FREE TIER: t2.micro = 750hrs/month for 12 months) ──────────────
+instance_type         = "t2.micro"
+bastion_instance_type = "t2.micro"
+key_pair_name         = "my-lks-keypair"   # must exist in the target region
+
+min_capacity     = 1  # FREE TIER: keep at 1 (750hrs = 1 instance)
+max_capacity     = 2
+desired_capacity = 1
+
+# ─── Database (FREE TIER: db.t3.micro + 20GB = 750hrs/month for 12 months) ───
+db_instance_class          = "db.t3.micro"
+db_name                    = "lksapp"
+db_username                = "dbadmin"   # password is auto-generated
+db_allocated_storage       = 20          # FREE TIER max = 20 GB
+db_max_allocated_storage   = 20          # equal = disable autoscaling
+db_backup_retention_period = 1
+
+# FREE TIER: false | EXTRA POINTS: true (doubles RDS cost)
+enable_multi_az = false
+
+# FREE TIER: false | EXTRA POINTS: true (extra instance cost)
+enable_read_replica = false
+
+# ─── Cache (ElastiCache is NOT in free tier at all) ───────────────────────────
+# FREE TIER: false | EXTRA POINTS: true (~$12+/month)
+enable_elasticache       = false
+redis_node_type          = "cache.t3.micro"
+redis_num_shards         = 1
+redis_replicas_per_shard = 0
+
+# ─── WAF (NOT free tier – ~$5/month minimum) ─────────────────────────────────
+# FREE TIER: false | EXTRA POINTS: true
+enable_waf = false
+
+# ─── KMS CMK ($1/key/month) ───────────────────────────────────────────────────
+# FREE TIER: false (uses AWS-managed keys, still encrypted)
+# EXTRA POINTS: true
+enable_kms_cmk = false
+
+# ─── Domain / SSL ─────────────────────────────────────────────────────────────
+domain_name = ""   # leave empty, use ALB DNS directly
+
+# ─── Monitoring ───────────────────────────────────────────────────────────────
+alert_email = "your@email.com"
+
+# ─── Safety ───────────────────────────────────────────────────────────────────
+# FREE TIER: false (allows clean terraform destroy)
+enable_deletion_protection = false
