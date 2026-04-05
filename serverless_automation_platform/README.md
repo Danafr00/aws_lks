@@ -300,16 +300,58 @@ Role:          create new (EventBridge will auto-create)
 Go to **EC2 → Launch Templates → Create**:
 
 ```
-AMI:             Amazon Linux 2
+AMI:             Ubuntu Server 22.04 LTS (64-bit x86)
 Instance type:   t3.micro
 Key pair:        your-keypair
 Security group:  ec2-sg
 IAM profile:     lks-ec2-role
-User data:
-  #!/bin/bash
-  yum update -y
-  yum install -y python3 pip
-  pip3 install flask pymysql boto3
+User data:       (paste the script below)
+```
+
+> **Before creating the Launch Template**, upload `ec2/app.py` to S3 first:
+> ```bash
+> aws s3 cp ec2/app.py s3://lks-reports-<your-account-id>/ec2/app.py
+> ```
+
+User data script — replace `<rds-endpoint>`, `<password>`, `<your-account-id>`:
+
+```bash
+#!/bin/bash
+set -e
+
+# 1. Install dependencies
+apt-get update -y
+apt-get install -y python3 python3-pip awscli
+pip3 install flask pymysql boto3
+
+# 2. Download app from S3
+aws s3 cp s3://lks-reports-<your-account-id>/ec2/app.py /home/ubuntu/app.py
+
+# 3. Register as a systemd service (auto-starts on boot, restarts on crash)
+cat > /etc/systemd/system/lks-dashboard.service << 'EOF'
+[Unit]
+Description=LKS Admin Dashboard
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+Environment="DB_HOST=<rds-endpoint>"
+Environment="DB_NAME=lksdb"
+Environment="DB_USER=admin"
+Environment="DB_PASSWORD=<password>"
+ExecStart=/usr/bin/python3 /home/ubuntu/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 4. Enable and start
+systemctl daemon-reload
+systemctl enable lks-dashboard
+systemctl start lks-dashboard
 ```
 
 #### Auto Scaling Group
@@ -336,7 +378,7 @@ Scaling policy: Target tracking → CPU 60%
 Go to **EC2 → Launch instance**:
 
 ```
-AMI:             Amazon Linux 2
+AMI:             Ubuntu Server 22.04 LTS (64-bit x86)
 Instance type:   t3.micro
 Subnet:          public-subnet-1
 Security group:  bastion-sg
@@ -387,7 +429,7 @@ Deploy to stage: `prod`
 Go to **Amplify → New app → Host web app**:
 
 ```
-Source:          GitHub → connect your repo
+Source:          Upload
 Branch:          main
 Build settings:  (auto-detected or set manually)
 Environment:     API_URL = <API Gateway URL>
@@ -439,16 +481,43 @@ Set base URL variable: `{{base_url}}` = your API Gateway URL
 ## Connecting to RDS via Bastion
 
 ```bash
-# SSH into Bastion
-ssh -i "your-key.pem" ec2-user@<bastion-public-ip>
+# SSH into Bastion (Ubuntu default user is "ubuntu")
+ssh -i "your-key.pem" ubuntu@<bastion-public-ip>
+
+# Install mysql client on bastion (Ubuntu)
+sudo apt-get install -y mysql-client
 
 # From Bastion, connect to RDS directly
 mysql -h <rds-endpoint> -P 3306 -u admin -p lksdb
 
 # OR: SSH tunnel from local machine
-ssh -i "your-key.pem" -N -L 3307:<rds-endpoint>:3306 ec2-user@<bastion-public-ip>
+ssh -i "your-key.pem" -N -L 3307:<rds-endpoint>:3306 ubuntu@<bastion-public-ip>
 mysql -h 127.0.0.1 -P 3307 -u admin -p lksdb
 ```
+
+---
+
+## Accessing the Admin Dashboard (ALB)
+
+The ALB (`lks-alb`) is **internet-facing on HTTP:80**, so you can open it directly in a browser:
+
+```
+http://<lks-alb-dns-name>/          ← full dashboard UI
+http://<lks-alb-dns-name>/health    ← ALB health check (returns JSON)
+http://<lks-alb-dns-name>/api/reports         ← JSON list of all reports
+http://<lks-alb-dns-name>/api/reports/<id>    ← JSON single report
+```
+
+Find the ALB DNS name in **EC2 → Load Balancers → lks-alb → DNS name**.
+
+> The EC2 instances are in **private subnets** — you cannot SSH into them directly.
+> Use the Bastion host to reach them if needed:
+> `ssh -J ubuntu@<bastion-ip> ubuntu@<ec2-private-ip>`
+
+The Flask app (`ec2/app.py`) shows:
+- Summary stats (total / completed / failed reports, total records)
+- Scrollable table of the 100 most recent reports with status badges
+- Auto-refresh button
 
 ---
 
@@ -457,11 +526,17 @@ mysql -h 127.0.0.1 -P 3307 -u admin -p lksdb
 ```
 serverless_automation_platform/
 ├── README.md
+├── amplify.yml                ← Amplify build config
+├── architecture.html
+├── frontend/
+│   └── index.html            ← Amplify web frontend (connects to API Gateway)
+├── ec2/
+│   └── app.py                ← Flask admin dashboard (runs on EC2, port 8080)
 └── lambdas/
     ├── validate/
-    │   └── index.py      ← validate uploaded file
+    │   └── index.py          ← validate uploaded file
     ├── process/
-    │   └── index.py      ← parse & save to RDS
+    │   └── index.py          ← parse & save to RDS
     └── notify/
-        └── index.py      ← publish to SNS
+        └── index.py          ← publish to SNS
 ```

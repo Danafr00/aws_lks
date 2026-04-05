@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LKS Report Platform</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f4f8;
+      color: #1a202c;
+    }
+
+    header {
+      background: #2b6cb0;
+      color: #fff;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header h1 { font-size: 1.25rem; }
+    header span { font-size: 0.85rem; opacity: 0.8; }
+
+    main {
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      padding: 1.5rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: #2d3748;
+    }
+
+    /* Upload form */
+    .form-group { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.25rem; }
+    input[type="text"], textarea {
+      width: 100%;
+      border: 1px solid #cbd5e0;
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      font-family: inherit;
+    }
+    textarea { resize: vertical; min-height: 100px; font-family: monospace; }
+    input[type="file"] {
+      width: 100%;
+      border: 1px dashed #90cdf4;
+      border-radius: 6px;
+      padding: 0.75rem;
+      background: #ebf8ff;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.5rem 1.25rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-primary { background: #3182ce; color: #fff; }
+    .btn-primary:hover { background: #2b6cb0; }
+    .btn-primary:disabled { background: #a0aec0; cursor: not-allowed; }
+    .btn-sm { padding: 0.3rem 0.75rem; font-size: 0.8rem; }
+    .btn-outline { background: #fff; border: 1px solid #cbd5e0; color: #4a5568; }
+    .btn-outline:hover { background: #f7fafc; }
+
+    /* Status banners */
+    .alert {
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      margin-top: 0.75rem;
+    }
+    .alert-success { background: #c6f6d5; color: #276749; }
+    .alert-error   { background: #fed7d7; color: #9b2c2c; }
+    .alert-info    { background: #bee3f8; color: #2c5282; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th {
+      background: #f7fafc;
+      text-align: left;
+      padding: 0.6rem 0.75rem;
+      font-weight: 600;
+      border-bottom: 2px solid #e2e8f0;
+      color: #4a5568;
+    }
+    td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #e2e8f0;
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f7fafc; }
+
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-success { background: #c6f6d5; color: #276749; }
+    .badge-warning { background: #feebc8; color: #7b341e; }
+    .badge-error   { background: #fed7d7; color: #9b2c2c; }
+    .badge-info    { background: #bee3f8; color: #2c5282; }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.75rem;
+      width: 100%;
+      max-width: 520px;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+    .modal h3 { font-size: 1rem; margin-bottom: 1rem; }
+    .modal-close {
+      float: right;
+      background: none;
+      border: none;
+      font-size: 1.25rem;
+      cursor: pointer;
+      color: #718096;
+    }
+    .detail-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.875rem; }
+    .detail-label { font-weight: 600; min-width: 130px; color: #4a5568; }
+
+    .loader {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .empty-state {
+      text-align: center;
+      padding: 2rem;
+      color: #a0aec0;
+      font-size: 0.875rem;
+    }
+
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0; }
+    .tab-btn {
+      padding: 0.5rem 1rem;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-size: 0.875rem;
+      color: #718096;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+    }
+    .tab-btn.active { color: #3182ce; border-bottom-color: #3182ce; font-weight: 600; }
+
+    #api-url-badge {
+      font-size: 0.75rem;
+      background: rgba(255,255,255,0.15);
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>LKS Report Platform</h1>
+    <span>Serverless Automation</span>
+  </div>
+  <div style="margin-left:auto;">
+    <span id="api-url-badge">Loading API URL…</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- Upload Card -->
+  <div class="card">
+    <h2>Submit Report</h2>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('json')">JSON Input</button>
+      <button class="tab-btn" onclick="switchTab('file')">Upload JSON File</button>
+    </div>
+
+    <div id="tab-json">
+      <div class="form-group">
+        <label for="filename">Filename</label>
+        <input type="text" id="filename" placeholder="e.g. report-2024-01.csv" />
+      </div>
+      <div class="form-group">
+        <label for="data-input">Data (JSON array)</label>
+        <textarea id="data-input" placeholder='[{"name":"Alice","score":90},{"name":"Bob","score":85}]'></textarea>
+      </div>
+    </div>
+
+    <div id="tab-file" style="display:none;">
+      <div class="form-group">
+        <label>Select JSON file</label>
+        <input type="file" id="file-input" accept=".json" onchange="handleFileUpload(event)" />
+        <p style="font-size:0.75rem;color:#718096;margin-top:0.4rem;">
+          File must be JSON with shape: <code>{"filename":"…","data":[…]}</code>
+        </p>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="submit-btn" onclick="submitReport()">
+      Submit Report
+    </button>
+    <div id="submit-status"></div>
+  </div>
+
+  <!-- Reports List Card -->
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+      <h2 style="margin:0;">Reports</h2>
+      <button class="btn btn-outline btn-sm" onclick="loadReports()">&#8635; Refresh</button>
+    </div>
+    <div id="reports-container">
+      <div class="empty-state">Click Refresh to load reports.</div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Detail Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <h3>Report Detail</h3>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script>
+  // ---------------------------------------------------------------------------
+  // Config — paste your API Gateway URL here before uploading to Amplify
+  // Example: "https://abc123.execute-api.ap-southeast-1.amazonaws.com/prod"
+  // ---------------------------------------------------------------------------
+  const API_URL = "https://YOUR_API_ID.execute-api.ap-southeast-1.amazonaws.com/prod";
+
+  document.getElementById("api-url-badge").textContent = API_URL || "API_URL not configured";
+
+  // ---------------------------------------------------------------------------
+  // Tabs
+  // ---------------------------------------------------------------------------
+  function switchTab(tab) {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    event.target.classList.add("active");
+    document.getElementById("tab-json").style.display = tab === "json" ? "" : "none";
+    document.getElementById("tab-file").style.display = tab === "file" ? "" : "none";
+  }
+
+  // ---------------------------------------------------------------------------
+  // File upload handler — reads JSON file into the form fields
+  // ---------------------------------------------------------------------------
+  function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (!parsed.filename || !parsed.data) {
+          showStatus("submit-status", "File must have 'filename' and 'data' fields.", "error");
+          return;
+        }
+        // stash parsed for submit
+        e.target._parsed = parsed;
+        showStatus("submit-status", `File ready: ${parsed.filename} (${parsed.data.length} rows)`, "info");
+      } catch {
+        showStatus("submit-status", "Invalid JSON file.", "error");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Submit report
+  // ---------------------------------------------------------------------------
+  async function submitReport() {
+    if (!API_URL) {
+      showStatus("submit-status", "API_URL is not configured. Set it in Amplify environment variables.", "error");
+      return;
+    }
+
+    let payload;
+    const activeTab = document.querySelector(".tab-btn.active").textContent.trim();
+
+    if (activeTab === "Upload JSON File") {
+      const fileInput = document.getElementById("file-input");
+      if (!fileInput._parsed) {
+        showStatus("submit-status", "Please select a valid JSON file first.", "error");
+        return;
+      }
+      payload = fileInput._parsed;
+    } else {
+      const filename = document.getElementById("filename").value.trim();
+      const dataRaw  = document.getElementById("data-input").value.trim();
+      if (!filename) { showStatus("submit-status", "Filename is required.", "error"); return; }
+      if (!dataRaw)  { showStatus("submit-status", "Data is required.", "error"); return; }
+      let data;
+      try { data = JSON.parse(dataRaw); } catch {
+        showStatus("submit-status", "Data must be valid JSON.", "error"); return;
+      }
+      if (!Array.isArray(data) || data.length === 0) {
+        showStatus("submit-status", "Data must be a non-empty array.", "error"); return;
+      }
+      payload = { filename, data };
+    }
+
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span> Submitting…';
+
+    try {
+      const res = await fetch(`${API_URL}/reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        showStatus("submit-status",
+          `Report submitted! ID: ${json.id ?? "—"} | Records: ${json.record_count ?? "—"}`,
+          "success");
+        document.getElementById("filename").value = "";
+        document.getElementById("data-input").value = "";
+        loadReports();
+      } else {
+        showStatus("submit-status", `Error ${res.status}: ${json.error ?? JSON.stringify(json)}`, "error");
+      }
+    } catch (err) {
+      showStatus("submit-status", `Network error: ${err.message}`, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Submit Report";
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Load reports list
+  // ---------------------------------------------------------------------------
+  async function loadReports() {
+    if (!API_URL) {
+      document.getElementById("reports-container").innerHTML =
+        '<div class="empty-state">API_URL not configured.</div>';
+      return;
+    }
+
+    document.getElementById("reports-container").innerHTML =
+      '<div class="empty-state">Loading…</div>';
+
+    try {
+      const res  = await fetch(`${API_URL}/reports`);
+      const data = await res.json();
+      const reports = Array.isArray(data) ? data : (data.reports ?? []);
+
+      if (reports.length === 0) {
+        document.getElementById("reports-container").innerHTML =
+          '<div class="empty-state">No reports found.</div>';
+        return;
+      }
+
+      const rows = reports.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td>${escHtml(r.filename)}</td>
+          <td>${r.record_count ?? "—"}</td>
+          <td>${badgeStatus(r.status)}</td>
+          <td>${r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</td>
+          <td>
+            <button class="btn btn-outline btn-sm" onclick="loadDetail(${r.id})">View</button>
+          </td>
+        </tr>`).join("");
+
+      document.getElementById("reports-container").innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Filename</th><th>Records</th>
+              <th>Status</th><th>Created At</th><th></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    } catch (err) {
+      document.getElementById("reports-container").innerHTML =
+        `<div class="alert alert-error">Failed to load: ${err.message}</div>`;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Load single report detail
+  // ---------------------------------------------------------------------------
+  async function loadDetail(id) {
+    document.getElementById("modal-content").innerHTML = "<p>Loading…</p>";
+    document.getElementById("modal-overlay").classList.add("open");
+
+    try {
+      const res  = await fetch(`${API_URL}/reports/${id}`);
+      const r    = await res.json();
+      document.getElementById("modal-content").innerHTML = `
+        <div class="detail-row"><span class="detail-label">ID</span><span>${r.id}</span></div>
+        <div class="detail-row"><span class="detail-label">Filename</span><span>${escHtml(r.filename)}</span></div>
+        <div class="detail-row"><span class="detail-label">Record Count</span><span>${r.record_count ?? "—"}</span></div>
+        <div class="detail-row"><span class="detail-label">Status</span><span>${badgeStatus(r.status)}</span></div>
+        <div class="detail-row"><span class="detail-label">Created At</span><span>${r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</span></div>
+      `;
+    } catch (err) {
+      document.getElementById("modal-content").innerHTML =
+        `<div class="alert alert-error">Error: ${err.message}</div>`;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+  function closeModal(e) {
+    if (!e || e.target === document.getElementById("modal-overlay") || !e.target) {
+      document.getElementById("modal-overlay").classList.remove("open");
+    }
+  }
+
+  function showStatus(id, msg, type) {
+    const el = document.getElementById(id);
+    el.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+  }
+
+  function badgeStatus(s) {
+    const map = { completed:"success", success:"success", failed:"error", error:"error",
+                  processing:"info", pending:"warning" };
+    const cls = map[(s||"").toLowerCase()] ?? "info";
+    return `<span class="badge badge-${cls}">${s ?? "unknown"}</span>`;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  // Auto-load on start
+  loadReports();
+</script>
+</body>
+</html>
