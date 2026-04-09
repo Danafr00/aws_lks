@@ -3,7 +3,7 @@
 apt update -y
 apt install python3-pip -y
 
-pip3 install boto3 psycopg2-binary --break-system-packages
+pip3 install boto3 psycopg2-binary
 
 cat <<EOF > /home/ubuntu/process.py
 <PASTE process.py CONTENT HERE>
