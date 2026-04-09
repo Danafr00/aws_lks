@@ -7,7 +7,7 @@ S3_BUCKET = "student-score-bucket"
 DB_CONFIG = {
     "host": "YOUR_RDS_ENDPOINT",
     "database": "postgres",
-    "user": "admin",
+    "user": "postgres",
     "password": "password123"
 }
 
