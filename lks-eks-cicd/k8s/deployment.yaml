@@ -1,0 +1,68 @@
+# Replace <ACCOUNT_ID> with your 12-digit AWS account ID.
+# scripts/03-deploy-app.sh patches this automatically.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet-api
+  namespace: wallet
+  labels:
+    app: wallet-api
+    version: v1
+    Project: nusantara-wallet
+    Environment: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wallet-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: wallet-api
+        version: v1
+    spec:
+      serviceAccountName: wallet-api-sa
+      containers:
+        - name: wallet-api
+          image: <ACCOUNT_ID>.dkr.ecr.ap-southeast-1.amazonaws.com/lks-wallet-api:latest
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          envFrom:
+            - configMapRef:
+                name: wallet-api-config
+            - secretRef:
+                name: wallet-api-secret
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: wallet-uploads-pvc
+      terminationGracePeriodSeconds: 30

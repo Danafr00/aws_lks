@@ -1,0 +1,18 @@
+# ReadWriteMany PVC backed by EFS via the efs-sc StorageClass.
+# All wallet-api pods across all nodes can read and write /app/uploads simultaneously.
+# EBS does NOT support ReadWriteMany — that is why EFS is used here.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wallet-uploads-pvc
+  namespace: wallet
+  labels:
+    app: wallet-api
+    Project: nusantara-wallet
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 1Gi

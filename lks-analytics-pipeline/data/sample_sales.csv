@@ -1,0 +1,11 @@
+transaction_id,store_id,product_id,product_name,category,quantity,unit_price,amount,sale_date,payment_method
+TXN-20240115-001,STORE-JKT-01,PROD-001,Indomie Goreng,food,5,3500,17500,2024-01-15,cash
+TXN-20240115-002,STORE-JKT-01,PROD-002,Aqua 600ml,beverage,2,5000,10000,2024-01-15,qris
+TXN-20240115-003,STORE-BDG-01,PROD-003,Teh Botol Sosro,beverage,3,4500,13500,2024-01-15,debit_card
+TXN-20240115-004,STORE-BDG-01,PROD-004,Chitato Originale,snack,1,12000,12000,2024-01-15,cash
+TXN-20240115-005,STORE-SBY-01,PROD-005,Beras Premium 5kg,staple,2,65000,130000,2024-01-15,transfer
+TXN-20240115-006,STORE-SBY-01,PROD-001,Indomie Goreng,food,10,3500,35000,2024-01-15,qris
+TXN-20240115-007,STORE-MDN-01,PROD-006,Minyak Goreng 2L,staple,1,35000,35000,2024-01-15,cash
+TXN-20240115-008,STORE-MDN-01,PROD-007,Sabun Lifebuoy,personal_care,2,8500,17000,2024-01-15,qris
+TXN-20240115-009,STORE-JKT-02,PROD-008,Kopi Kapal Api,food,3,25000,75000,2024-01-15,debit_card
+TXN-20240115-010,STORE-JKT-02,PROD-009,Energen Coklat,food,5,7500,37500,2024-01-15,cash

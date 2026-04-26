@@ -1,0 +1,23 @@
+# Used by the GitHub Actions deploy job.
+# ECR_REGISTRY and IMAGE_TAG are replaced via sed before kubectl apply.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: wallet-migrate
+  namespace: wallet
+spec:
+  ttlSecondsAfterFinished: 60
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: wallet-api-sa
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ECR_REGISTRY/lks-wallet-api:IMAGE_TAG
+          command: ["./server", "--migrate-only"]
+          envFrom:
+            - configMapRef:
+                name: wallet-api-config
+            - secretRef:
+                name: wallet-api-secret

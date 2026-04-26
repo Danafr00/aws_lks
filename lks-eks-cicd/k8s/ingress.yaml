@@ -1,0 +1,33 @@
+# Replace <PUBLIC_SUBNET_1A_ID>, <PUBLIC_SUBNET_1B_ID>, and <ACM_CERTIFICATE_ARN>
+# with your actual resource IDs before applying.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wallet-api-ingress
+  namespace: wallet
+  labels:
+    Project: nusantara-wallet
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/subnets: <PUBLIC_SUBNET_1A_ID>,<PUBLIC_SUBNET_1B_ID>
+    alb.ingress.kubernetes.io/certificate-arn: <ACM_CERTIFICATE_ARN>
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/actions.ssl-redirect: >
+      {"type":"redirect","redirectConfig":{"protocol":"HTTPS","port":"443","statusCode":"HTTP_301"}}
+    alb.ingress.kubernetes.io/tags: Project=nusantara-wallet,Environment=production
+spec:
+  ingressClassName: alb
+  rules:
+    - host: api.nusantarawallet.id
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wallet-api-svc
+                port:
+                  number: 80

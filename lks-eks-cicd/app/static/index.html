@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nusantara Wallet – LKS Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #1e40af, #7c3aed);
+      padding: 2rem;
+      text-align: center;
+    }
+    header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.5px; }
+    header p  { margin-top: .4rem; font-size: .9rem; opacity: .75; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: .4rem;
+      background: rgba(255,255,255,.15); border-radius: 999px;
+      padding: .25rem .75rem; font-size: .75rem; margin-top: .8rem;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80;
+           animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    main {
+      max-width: 900px; margin: 2rem auto; padding: 0 1rem;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+    }
+    @media (max-width: 640px) { main { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #1e293b; border-radius: 12px; overflow: hidden;
+      border: 1px solid #334155;
+    }
+    .card-header {
+      padding: 1rem 1.25rem; border-bottom: 1px solid #334155;
+      display: flex; align-items: center; gap: .6rem;
+    }
+    .card-header .icon { font-size: 1.2rem; }
+    .card-header h2 { font-size: 1rem; font-weight: 600; }
+    .card-header .tag {
+      margin-left: auto; font-size: .7rem; padding: .2rem .5rem;
+      border-radius: 4px; font-weight: 600; letter-spacing: .3px;
+    }
+    .tag-postgres { background: #1e3a5f; color: #60a5fa; }
+    .tag-efs      { background: #1a3a2a; color: #4ade80; }
+
+    .card-body { padding: 1.25rem; }
+
+    /* Form elements */
+    input[type="text"], textarea {
+      width: 100%; padding: .6rem .75rem; background: #0f172a;
+      border: 1px solid #475569; border-radius: 8px; color: #e2e8f0;
+      font-size: .875rem; outline: none; resize: none;
+    }
+    input[type="text"]:focus, textarea:focus { border-color: #6366f1; }
+
+    input[type="file"] {
+      width: 100%; padding: .5rem; background: #0f172a;
+      border: 1px dashed #475569; border-radius: 8px; color: #94a3b8;
+      font-size: .8rem; cursor: pointer;
+    }
+
+    .btn {
+      margin-top: .75rem; width: 100%; padding: .6rem;
+      border: none; border-radius: 8px; font-size: .875rem;
+      font-weight: 600; cursor: pointer; transition: opacity .15s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn-indigo { background: #6366f1; color: #fff; }
+    .btn-green  { background: #16a34a; color: #fff; }
+
+    /* Lists */
+    .list { margin-top: 1rem; display: flex; flex-direction: column; gap: .5rem; max-height: 280px; overflow-y: auto; }
+    .list::-webkit-scrollbar { width: 4px; }
+    .list::-webkit-scrollbar-thumb { background: #475569; border-radius: 2px; }
+
+    .note-item {
+      background: #0f172a; border-radius: 8px; padding: .6rem .75rem;
+      border-left: 3px solid #6366f1; font-size: .85rem;
+    }
+    .note-item .meta { font-size: .7rem; color: #64748b; margin-top: .25rem; }
+
+    .file-item {
+      background: #0f172a; border-radius: 8px; padding: .6rem .75rem;
+      border-left: 3px solid #4ade80; font-size: .85rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .file-item a { color: #4ade80; text-decoration: none; font-weight: 500; }
+    .file-item a:hover { text-decoration: underline; }
+    .file-size { font-size: .7rem; color: #64748b; }
+
+    .empty { color: #475569; font-size: .8rem; text-align: center; padding: 1rem 0; }
+
+    .status-bar {
+      font-size: .75rem; text-align: center; padding: .5rem;
+      border-radius: 6px; margin-top: .75rem;
+    }
+    .status-ok  { background: #14532d; color: #4ade80; }
+    .status-err { background: #450a0a; color: #f87171; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🏦 Nusantara Wallet API</h1>
+  <p>LKS Cloud Computing · EKS + EFS + PostgreSQL Demo</p>
+  <div class="badge"><span class="dot"></span> Live on Amazon EKS</div>
+</header>
+
+<main>
+
+  <!-- ── PostgreSQL Card ─────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">🐘</span>
+      <h2>Transaction Notes</h2>
+      <span class="tag tag-postgres">PostgreSQL</span>
+    </div>
+    <div class="card-body">
+      <input type="text" id="note-input" placeholder="Write a note and press Save…" maxlength="200">
+      <button class="btn btn-indigo" onclick="saveNote()">💾 Save Note</button>
+      <div id="note-status" class="status-bar" style="display:none"></div>
+      <div class="list" id="notes-list">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EFS Card ───────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-header">
+      <span class="icon">📁</span>
+      <h2>Document Uploads</h2>
+      <span class="tag tag-efs">Amazon EFS</span>
+    </div>
+    <div class="card-body">
+      <input type="file" id="file-input">
+      <button class="btn btn-green" onclick="uploadFile()">⬆️ Upload to EFS</button>
+      <div id="file-status" class="status-bar" style="display:none"></div>
+      <div class="list" id="files-list">
+        <div class="empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+  const fmt = (iso) => new Date(iso).toLocaleString()
+  const bytes = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n/1024).toFixed(1) + ' KB' : (n/1048576).toFixed(1) + ' MB'
+
+  function showStatus(id, msg, ok) {
+    const el = document.getElementById(id)
+    el.textContent = msg
+    el.className = 'status-bar ' + (ok ? 'status-ok' : 'status-err')
+    el.style.display = 'block'
+    setTimeout(() => { el.style.display = 'none' }, 3000)
+  }
+
+  // ── Notes (PostgreSQL) ───────────────────────────────────────
+  async function loadNotes() {
+    try {
+      const res  = await fetch('/api/notes')
+      const data = await res.json()
+      const list = document.getElementById('notes-list')
+      if (!data.length) { list.innerHTML = '<div class="empty">No notes yet — add one!</div>'; return }
+      list.innerHTML = data.map(n => `
+        <div class="note-item">
+          ${escHtml(n.content)}
+          <div class="meta">#${n.id} · ${fmt(n.created_at)}</div>
+        </div>`).join('')
+    } catch { }
+  }
+
+  async function saveNote() {
+    const input = document.getElementById('note-input')
+    const content = input.value.trim()
+    if (!content) { showStatus('note-status', 'Please enter some text first.', false); return }
+
+    try {
+      const res = await fetch('/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      })
+      if (!res.ok) throw new Error()
+      input.value = ''
+      showStatus('note-status', '✓ Note saved to PostgreSQL', true)
+      loadNotes()
+    } catch {
+      showStatus('note-status', '✗ Failed to save note', false)
+    }
+  }
+
+  document.getElementById('note-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveNote()
+  })
+
+  // ── Files (EFS) ──────────────────────────────────────────────
+  async function loadFiles() {
+    try {
+      const res  = await fetch('/api/files')
+      const data = await res.json()
+      const list = document.getElementById('files-list')
+      if (!data.length) { list.innerHTML = '<div class="empty">No files yet — upload one!</div>'; return }
+      list.innerHTML = data.map(f => `
+        <div class="file-item">
+          <a href="${f.url}" target="_blank">📄 ${escHtml(f.name)}</a>
+          <span class="file-size">${bytes(f.size)}</span>
+        </div>`).join('')
+    } catch { }
+  }
+
+  async function uploadFile() {
+    const input = document.getElementById('file-input')
+    if (!input.files.length) { showStatus('file-status', 'Please choose a file first.', false); return }
+
+    const form = new FormData()
+    form.append('file', input.files[0])
+
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: form })
+      if (!res.ok) throw new Error()
+      input.value = ''
+      showStatus('file-status', '✓ File saved to EFS (shared across all pods)', true)
+      loadFiles()
+    } catch {
+      showStatus('file-status', '✗ Upload failed', false)
+    }
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+  }
+
+  // ── Auto-refresh every 10s ───────────────────────────────────
+  loadNotes(); loadFiles()
+  setInterval(() => { loadNotes(); loadFiles() }, 10000)
+</script>
+
+</body>
+</html>

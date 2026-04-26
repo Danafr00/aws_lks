@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wallet-api-config
+  namespace: wallet
+  labels:
+    app: wallet-api
+    Project: nusantara-wallet
+    Environment: production
+data:
+  APP_ENV: "production"
+  APP_PORT: "8080"
+  DB_HOST: "<RDS_ENDPOINT>"
+  DB_PORT: "5432"
+  DB_NAME: "wallet_db"
+  DB_USER: "walletadmin"
+  UPLOAD_PATH: "/app/uploads"
+  UPLOAD_MAX_SIZE: "10485760"

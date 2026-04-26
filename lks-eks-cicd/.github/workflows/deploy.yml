@@ -1,0 +1,154 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: lks-wallet-api
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+
+jobs:
+  # ── Job 1: Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'app/go.mod'
+          cache: false   # go.sum is generated at build time — no committed sum file
+
+      - name: Tidy, vet, and test
+        working-directory: app
+        run: |
+          go mod tidy
+          go vet ./...
+          go test -race -v ./...
+
+  # ── Job 2: Build and push image to ECR ──────────────────────────────────────
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      image-tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set short SHA tag
+        id: vars
+        run: echo "sha_short=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/LKS-GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          # Build from the app/ subdirectory using its Dockerfile
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -f app/Dockerfile \
+            app/
+          docker tag \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "Pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # ── Job 3: Deploy to EKS ────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production   # requires manual approval in GitHub → Settings → Environments
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ubuntu-latest does not ship kubectl — install it explicitly
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.31.0'
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/LKS-GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      # Kubernetes Job spec is immutable — delete before re-creating on every run
+      - name: Run database migration
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        run: |
+          kubectl delete job wallet-migrate -n wallet --ignore-not-found
+
+          sed "s|IMAGE_TAG|$IMAGE_TAG|g" k8s/migrate-job.yaml | \
+          sed "s|ECR_REGISTRY|$ECR_REGISTRY|g" | \
+          kubectl apply -f -
+
+          kubectl wait --for=condition=complete job/wallet-migrate \
+            -n wallet --timeout=120s || {
+            echo "Migration failed or timed out. Logs:"
+            kubectl logs -n wallet -l job-name=wallet-migrate --tail=50
+            exit 1
+          }
+
+          kubectl delete job wallet-migrate -n wallet --ignore-not-found
+
+      - name: Update deployment image
+        id: set-image
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        run: |
+          kubectl set image deployment/wallet-api \
+            wallet-api=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -n wallet
+
+      - name: Wait for rollout
+        id: wait-rollout
+        run: |
+          kubectl rollout status deployment/wallet-api \
+            -n wallet --timeout=300s
+
+      # Only rollback if the rollout itself failed — not for credential or migration failures
+      - name: Rollback on rollout failure
+        if: steps.wait-rollout.outcome == 'failure'
+        run: |
+          echo "Rollout failed — rolling back to previous revision"
+          kubectl rollout undo deployment/wallet-api -n wallet
+          kubectl rollout status deployment/wallet-api -n wallet --timeout=120s
