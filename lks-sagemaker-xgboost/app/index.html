@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loan Risk Assessment — PT. Nusantara FinCredit</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Tahoma, sans-serif; background: #edf2f7; min-height: 100vh; padding: 28px 16px; }
+  .card { max-width: 680px; margin: 0 auto; background: #fff; border-radius: 16px; padding: 32px; box-shadow: 0 4px 28px rgba(0,0,0,.09); }
+  .hdr h1 { font-size: 1.35rem; color: #1a202c; font-weight: 700; }
+  .hdr p { color: #718096; font-size: .85rem; margin-top: 3px; }
+  .badge { display: inline-block; background: #ebf8ff; color: #2b6cb0; font-size: .7rem; font-weight: 700; padding: 2px 10px; border-radius: 20px; margin-top: 8px; }
+  .sec { font-size: .72rem; font-weight: 700; color: #4a5568; text-transform: uppercase; letter-spacing: .06em; margin: 22px 0 12px; padding-left: 9px; border-left: 3px solid #4299e1; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .f { display: flex; flex-direction: column; gap: 4px; }
+  .f label { font-size: .8rem; font-weight: 600; color: #4a5568; }
+  .f input, .f select { padding: 9px 11px; border: 1.5px solid #e2e8f0; border-radius: 8px; font-size: .9rem; color: #1a202c; transition: border-color .18s; }
+  .f input:focus, .f select:focus { outline: none; border-color: #4299e1; box-shadow: 0 0 0 3px rgba(66,153,225,.15); }
+  .hint { font-size: .7rem; color: #a0aec0; }
+  .btn { width: 100%; padding: 13px; background: #2b6cb0; color: #fff; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 22px; transition: background .2s; }
+  .btn:hover { background: #2c5282; }
+  .btn:disabled { background: #90cdf4; cursor: not-allowed; }
+  .result { margin-top: 22px; padding: 20px 22px; border-radius: 12px; display: none; }
+  .result.show { display: block; }
+  .low { background: #f0fff4; border: 1.5px solid #9ae6b4; }
+  .medium { background: #fffff0; border: 1.5px solid #f6e05e; }
+  .high { background: #fff5f5; border: 1.5px solid #feb2b2; }
+  .rh { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+  .rt { font-size: .8rem; font-weight: 600; color: #718096; margin-bottom: 4px; }
+  .pct { font-size: 2.6rem; font-weight: 800; line-height: 1; }
+  .low .pct { color: #22543d; } .medium .pct { color: #744210; } .high .pct { color: #742a2a; }
+  .rbadge { padding: 5px 14px; border-radius: 20px; font-size: .82rem; font-weight: 700; white-space: nowrap; }
+  .low .rbadge { background: #9ae6b4; color: #1a4731; }
+  .medium .rbadge { background: #f6e05e; color: #5f370e; }
+  .high .rbadge { background: #feb2b2; color: #63171b; }
+  .decision { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(0,0,0,.04); font-size: .9rem; font-weight: 600; color: #2d3748; }
+  .detail { margin-top: 6px; font-size: .8rem; color: #718096; }
+  .err { display: none; margin-top: 14px; padding: 11px 15px; border-radius: 8px; background: #fff5f5; border: 1.5px solid #feb2b2; color: #742a2a; font-size: .85rem; }
+  .err.show { display: block; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="hdr">
+    <h1>Loan Risk Assessment System</h1>
+    <p>PT. Nusantara FinCredit &mdash; P2P Lending Platform</p>
+    <span class="badge">&#9889; Powered by AWS SageMaker XGBoost</span>
+  </div>
+
+  <form id="frm" onsubmit="assess(event)">
+    <div class="sec">Applicant Profile</div>
+    <div class="grid">
+      <div class="f">
+        <label>Age</label>
+        <input type="number" id="age" min="18" max="80" value="35" required>
+      </div>
+      <div class="f">
+        <label>Employment Years</label>
+        <input type="number" id="employment_years" min="0" max="45" value="7" required>
+        <span class="hint">Years in current / most recent job</span>
+      </div>
+      <div class="f">
+        <label>Annual Income (USD)</label>
+        <input type="number" id="annual_income" min="10000" max="600000" step="1000" value="72000" required>
+      </div>
+      <div class="f">
+        <label>Credit Score</label>
+        <input type="number" id="credit_score" min="300" max="850" value="695" required>
+        <span class="hint">300 (very poor) &ndash; 850 (exceptional)</span>
+      </div>
+    </div>
+
+    <div class="sec">Loan Details</div>
+    <div class="grid">
+      <div class="f">
+        <label>Loan Amount (USD)</label>
+        <input type="number" id="loan_amount" min="1000" max="100000" step="500" value="15000" required>
+      </div>
+      <div class="f">
+        <label>Loan Term</label>
+        <select id="loan_term_months">
+          <option value="12">12 months (1 year)</option>
+          <option value="24">24 months (2 years)</option>
+          <option value="36" selected>36 months (3 years)</option>
+          <option value="48">48 months (4 years)</option>
+          <option value="60">60 months (5 years)</option>
+        </select>
+      </div>
+      <div class="f">
+        <label>Debt-to-Income Ratio</label>
+        <input type="number" id="debt_to_income_ratio" min="0.01" max="0.95" step="0.01" value="0.28" required>
+        <span class="hint">Monthly debt payments &divide; gross monthly income</span>
+      </div>
+      <div class="f">
+        <label>Has Existing Mortgage</label>
+        <select id="has_mortgage">
+          <option value="0" selected>No</option>
+          <option value="1">Yes</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="sec">Credit History</div>
+    <div class="grid">
+      <div class="f">
+        <label>Number of Credit Lines</label>
+        <input type="number" id="num_credit_lines" min="0" max="30" value="4" required>
+      </div>
+      <div class="f">
+        <label>Late Payments (past 2 years)</label>
+        <input type="number" id="num_late_payments" min="0" max="20" value="0" required>
+      </div>
+    </div>
+
+    <button type="submit" class="btn" id="btn">Assess Loan Risk</button>
+  </form>
+
+  <div class="err" id="err"></div>
+
+  <div class="result" id="res">
+    <div class="rh">
+      <div>
+        <div class="rt">Default Probability</div>
+        <div class="pct" id="pct"></div>
+      </div>
+      <div class="rbadge" id="rbadge"></div>
+    </div>
+    <div class="decision" id="dec"></div>
+    <div class="detail" id="det"></div>
+  </div>
+</div>
+
+<script>
+  // Injected by scripts/05-deploy-amplify.sh — do not edit manually
+  const API_BASE = '__API_GATEWAY_URL__';
+
+  async function assess(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btn');
+    const err = document.getElementById('err');
+    btn.textContent = 'Assessing…';
+    btn.disabled = true;
+    err.className = 'err';
+
+    const g = id => document.getElementById(id).value;
+    const payload = {
+      age:                   parseInt(g('age')),
+      annual_income:         parseFloat(g('annual_income')),
+      loan_amount:           parseFloat(g('loan_amount')),
+      loan_term_months:      parseInt(g('loan_term_months')),
+      credit_score:          parseInt(g('credit_score')),
+      employment_years:      parseInt(g('employment_years')),
+      debt_to_income_ratio:  parseFloat(g('debt_to_income_ratio')),
+      has_mortgage:          parseInt(g('has_mortgage')),
+      num_credit_lines:      parseInt(g('num_credit_lines')),
+      num_late_payments:     parseInt(g('num_late_payments')),
+    };
+
+    try {
+      const r = await fetch(`${API_BASE}/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) { const t = await r.text(); throw new Error(t || 'HTTP ' + r.status); }
+      const d = await r.json();
+
+      const lvl = d.risk_level.toLowerCase();
+      const res = document.getElementById('res');
+      res.className = 'result show ' + lvl;
+      document.getElementById('pct').textContent    = d.probability + '%';
+      document.getElementById('rbadge').textContent = d.risk_level + ' RISK';
+      document.getElementById('dec').textContent    = '🏦 ' + d.recommendation;
+      document.getElementById('det').textContent    = {
+        low:    'Strong credit profile. Applicant presents low default risk.',
+        medium: 'Moderate risk detected. Additional review or collateral may be required.',
+        high:   'High default risk. Application does not meet minimum approval criteria.',
+      }[lvl];
+    } catch (ex) {
+      err.className = 'err show';
+      err.textContent = 'Error: ' + ex.message + '. Check the browser console for details.';
+    }
+
+    btn.textContent = 'Assess Loan Risk';
+    btn.disabled = false;
+  }
+</script>
+</body>
+</html>
