@@ -1,8 +1,14 @@
-# Step-by-Step: EKS + ALB — Full Manual Setup from VPC
+# Step-by-Step: EKS + ALB — Managed Node Group
 
-**Goal**: Deploy a simple nginx app on EKS, accessible via ALB.
-**All commands are copy-pasteable AWS CLI / kubectl / helm.**
+**Goal**: Deploy a simple nginx app on EKS, accessible via ALB, using a managed node group.  
+**All commands are copy-pasteable AWS CLI / kubectl / helm.**  
 **Region**: ap-southeast-1 | **Cost warning**: EKS = $0.10/hr — delete after use.
+
+> **Node group rules learned from experience:**
+> - **Never use a custom launch template** — causes AMI/bootstrap mismatch issues
+> - **Never use a plain Ubuntu AMI** — `bootstrap.sh` was removed from AL2023 AMIs
+> - **Always use `AL2023_x86_64_STANDARD` amiType** — EKS picks the right AMI and injects the correct bootstrap config automatically
+> - **Subnet tags must match the cluster name exactly** — `kubernetes.io/cluster/<cluster-name>`
 
 ---
 
@@ -13,12 +19,12 @@
 | 1 | Variables + VPC + Networking | 5 min |
 | 2 | IAM Roles | 3 min |
 | 3 | EKS Cluster (wait) | 12 min |
-| 4 | Node Group (wait) | 5 min |
+| 4 | Node Group (wait) | 7 min |
 | 5 | OIDC + Load Balancer Controller | 5 min |
 | 6 | Deploy App | 2 min |
 | 7 | Test ALB (wait) | 5 min |
 | 8 | Cleanup | 5 min |
-| **Total** | | **~42 min** |
+| **Total** | | **~44 min** |
 
 ---
 
@@ -62,7 +68,7 @@ SUBNET2_ID=$(aws ec2 create-subnet \
 aws ec2 modify-subnet-attribute --subnet-id $SUBNET1_ID --map-public-ip-on-launch
 aws ec2 modify-subnet-attribute --subnet-id $SUBNET2_ID --map-public-ip-on-launch
 
-# Tags required by AWS Load Balancer Controller to discover subnets
+# Tags required by the built-in Load Balancer Controller to discover subnets
 aws ec2 create-tags --resources $SUBNET1_ID $SUBNET2_ID \
   --tags \
   Key=kubernetes.io/cluster/${CLUSTER_NAME},Value=shared \
@@ -151,7 +157,10 @@ aws iam create-role \
   --role-name LKS-EKSNodeRole \
   --assume-role-policy-document file:///tmp/eks-node-trust.json
 
-for POLICY in AmazonEKSWorkerNodePolicy AmazonEC2ContainerRegistryReadOnly AmazonEKS_CNI_Policy; do
+for POLICY in \
+  AmazonEKSWorkerNodePolicy \
+  AmazonEKS_CNI_Policy \
+  AmazonEC2ContainerRegistryReadOnly; do
   aws iam attach-role-policy \
     --role-name LKS-EKSNodeRole \
     --policy-arn arn:aws:iam::aws:policy/$POLICY
@@ -173,11 +182,12 @@ echo "--- Phase 2 done ---"
 aws eks create-cluster \
   --name $CLUSTER_NAME \
   --region $AWS_REGION \
-  --kubernetes-version 1.29 \
+  --kubernetes-version 1.35 \
   --role-arn $CLUSTER_ROLE_ARN \
   --resources-vpc-config \
     subnetIds=$SUBNET1_ID,$SUBNET2_ID,\
-endpointPublicAccess=true,endpointPrivateAccess=false
+endpointPublicAccess=true,endpointPrivateAccess=false \
+  --access-config authenticationMode=API
 
 echo "Waiting for cluster to be ACTIVE (~12 minutes)..."
 aws eks wait cluster-active --name $CLUSTER_NAME --region $AWS_REGION
@@ -187,51 +197,15 @@ echo "Cluster ACTIVE!"
 aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 kubectl get svc
 # Expected: kubernetes   ClusterIP   10.100.0.1   ...
+
+echo "--- Phase 3 done ---"
 ```
 
 ---
 
-## Phase 4 — Node Group (Ubuntu 22.04)
+## Phase 4 — Node Group
 
-EKS managed node groups don't have a built-in Ubuntu option — you need to supply a custom AMI via a launch template.
-
-### 4a. Get Ubuntu EKS-Optimized AMI
-
-Canonical publishes Ubuntu EKS AMIs to SSM. Fetch the latest for Ubuntu 22.04 + Kubernetes 1.29:
-
-```bash
-UBUNTU_AMI=$(aws ssm get-parameter \
-  --name /aws/service/canonical/ubuntu/eks/22.04/1.29/stable/current/amd64/hvm/ebs-gp2/ami-id \
-  --region $AWS_REGION \
-  --query 'Parameter.Value' --output text)
-echo "Ubuntu AMI: $UBUNTU_AMI"
-```
-
-### 4b. Create EC2 Launch Template
-
-The launch template carries only two things: the AMI and the bootstrap userdata. Everything else (instance type, security groups, IAM) is handled by the nodegroup itself.
-
-```bash
-# Bootstrap script — tells the Ubuntu node which cluster to join
-cat > /tmp/userdata.sh << EOF
-#!/bin/bash
-/etc/eks/bootstrap.sh $CLUSTER_NAME
-EOF
-
-USERDATA_B64=$(base64 < /tmp/userdata.sh)
-
-LT_ID=$(aws ec2 create-launch-template \
-  --launch-template-name lks-ubuntu-lt \
-  --launch-template-data "{
-    \"imageId\": \"$UBUNTU_AMI\",
-    \"userData\": \"$USERDATA_B64\"
-  }" \
-  --query 'LaunchTemplate.LaunchTemplateId' --output text)
-
-echo "Launch Template: $LT_ID"
-```
-
-### 4c. Create Node Group
+> **Important**: Do NOT use a launch template or custom AMI. Use `amiType=AL2023_x86_64_STANDARD` and let EKS manage the AMI and bootstrap config automatically. Using a custom AMI or the old `bootstrap.sh` user data will cause nodes to fail to join the cluster.
 
 ```bash
 aws eks create-nodegroup \
@@ -240,12 +214,11 @@ aws eks create-nodegroup \
   --node-role $NODE_ROLE_ARN \
   --subnets $SUBNET1_ID $SUBNET2_ID \
   --instance-types t3.small \
-  --ami-type CUSTOM \
-  --launch-template id=$LT_ID,version=1 \
+  --ami-type AL2023_x86_64_STANDARD \
   --scaling-config minSize=1,maxSize=3,desiredSize=2 \
   --region $AWS_REGION
 
-echo "Waiting for node group to be ACTIVE (~5 minutes)..."
+echo "Waiting for node group to be ACTIVE (~7 minutes)..."
 aws eks wait nodegroup-active \
   --cluster-name $CLUSTER_NAME \
   --nodegroup-name lks-nodes \
@@ -253,7 +226,7 @@ aws eks wait nodegroup-active \
 echo "Node group ACTIVE!"
 
 kubectl get nodes
-# Expected: 2 nodes — OS shown as ubuntu in node labels
+# Expected: 2 nodes in Ready state
 echo "--- Phase 4 done ---"
 ```
 
@@ -264,22 +237,18 @@ echo "--- Phase 4 done ---"
 ### 5a. Enable OIDC Provider
 
 ```bash
-# Get OIDC issuer URL and extract the ID
 OIDC_URL=$(aws eks describe-cluster \
   --name $CLUSTER_NAME --region $AWS_REGION \
   --query "cluster.identity.oidc.issuer" --output text)
 OIDC_ID=$(echo $OIDC_URL | awk -F'/' '{print $NF}')
 echo "OIDC ID: $OIDC_ID"
 
-# Get TLS thumbprint of the OIDC endpoint
 THUMBPRINT=$(echo | openssl s_client \
   -connect oidc.eks.${AWS_REGION}.amazonaws.com:443 2>/dev/null \
   | openssl x509 -fingerprint -sha1 -noout \
   | sed 's/.*=//;s/://g' \
   | tr '[:upper:]' '[:lower:]')
-echo "Thumbprint: $THUMBPRINT"
 
-# Register the OIDC provider
 aws iam create-open-id-connect-provider \
   --url $OIDC_URL \
   --client-id-list sts.amazonaws.com \
@@ -291,7 +260,6 @@ echo "OIDC provider created"
 ### 5b. IAM Policy + Role for LBC (IRSA)
 
 ```bash
-# Download LBC IAM policy
 curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
 
 aws iam create-policy \
@@ -300,7 +268,6 @@ aws iam create-policy \
 
 LBC_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy"
 
-# Create trust policy — allows only the LBC service account to assume this role
 cat > /tmp/lbc-trust.json << EOF
 {
   "Version": "2012-10-17",
@@ -334,17 +301,15 @@ LBC_ROLE_ARN=$(aws iam get-role \
 echo "LBC Role: $LBC_ROLE_ARN"
 ```
 
-### 5c. Create K8s Service Account + Install LBC
+### 5c. Install LBC via Helm
 
 ```bash
-# Create service account annotated with the IAM role ARN
 kubectl create serviceaccount aws-load-balancer-controller -n kube-system
 
 kubectl annotate serviceaccount aws-load-balancer-controller \
   -n kube-system \
   eks.amazonaws.com/role-arn=$LBC_ROLE_ARN
 
-# Install LBC via Helm
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update
 
@@ -356,11 +321,8 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   --set region=$AWS_REGION \
   --set vpcId=$VPC_ID
 
-# Verify controller is running
 kubectl rollout status deployment aws-load-balancer-controller -n kube-system
-kubectl get deployment -n kube-system aws-load-balancer-controller
 # Expected: READY 2/2
-
 echo "--- Phase 5 done ---"
 ```
 
@@ -381,13 +343,15 @@ kubectl apply -f k8s/
 # Watch pods start
 kubectl get pods --watch
 # Wait for 2/2 Running, then Ctrl+C
+
+echo "--- Phase 6 done ---"
 ```
 
 ---
 
 ## Phase 7 — Test ALB
 
-The ALB takes 2–4 minutes to be provisioned after the Ingress is applied.
+The LBC provisions the ALB 2–4 minutes after the Ingress is applied.
 
 ```bash
 # Watch until ADDRESS column is populated
@@ -412,7 +376,7 @@ open http://$ALB_URL
 ## Phase 8 — Cleanup (Do this to stop costs)
 
 ```bash
-# 1. Delete K8s resources — this triggers ALB deletion
+# 1. Delete K8s resources — triggers ALB deletion
 kubectl delete -f k8s/
 echo "Waiting 60s for ALB to be removed..."
 sleep 60
@@ -420,10 +384,7 @@ sleep 60
 # 2. Uninstall Helm chart
 helm uninstall aws-load-balancer-controller -n kube-system
 
-# 3. Delete launch template
-aws ec2 delete-launch-template --launch-template-id $LT_ID
-
-# 4. Delete node group (wait ~5 min)
+# 3. Delete node group (~5 min)
 aws eks delete-nodegroup \
   --cluster-name $CLUSTER_NAME \
   --nodegroup-name lks-nodes \
@@ -434,17 +395,20 @@ aws eks wait nodegroup-deleted \
   --region $AWS_REGION
 echo "Node group deleted"
 
-# 5. Delete EKS cluster (wait ~5 min)
+# 4. Delete EKS cluster (~5 min)
 aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION
 aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION
 echo "Cluster deleted"
 
-# 6. Delete IAM roles and policies
+# 5. Delete IAM roles
 aws iam detach-role-policy --role-name LKS-LBCRole --policy-arn $LBC_POLICY_ARN
 aws iam delete-role --role-name LKS-LBCRole
 aws iam delete-policy --policy-arn $LBC_POLICY_ARN
 
-for POLICY in AmazonEKSWorkerNodePolicy AmazonEC2ContainerRegistryReadOnly AmazonEKS_CNI_Policy; do
+for POLICY in \
+  AmazonEKSWorkerNodePolicy \
+  AmazonEKS_CNI_Policy \
+  AmazonEC2ContainerRegistryReadOnly; do
   aws iam detach-role-policy --role-name LKS-EKSNodeRole \
     --policy-arn arn:aws:iam::aws:policy/$POLICY
 done
@@ -480,7 +444,7 @@ Internet
     │  HTTP :80
     ▼
 Application Load Balancer
-  (internet-facing, provisioned by AWS LBC on Ingress create)
+  (internet-facing, provisioned by built-in LBC on Ingress create)
     │  target-type: ip — routes directly to pod IPs
     ▼
 Service: hello-app-svc (ClusterIP :80)
@@ -488,8 +452,8 @@ Service: hello-app-svc (ClusterIP :80)
     ├── Pod 1: nginx + hello-html ConfigMap
     └── Pod 2: nginx + hello-html ConfigMap
 
-        EKS Cluster (1.29)
-        └── Managed Node Group: 2x t3.small
+        EKS Cluster (1.35)
+        └── Managed Node Group: 2x t3.small (AL2023, no launch template)
             └── VPC: 10.0.0.0/16
                 ├── Subnet 10.0.1.0/24 (ap-southeast-1a)
                 └── Subnet 10.0.2.0/24 (ap-southeast-1b)
@@ -501,8 +465,18 @@ Service: hello-app-svc (ClusterIP :80)
 |---|---|
 | VPC, subnets, IGW, route tables | Phase 1 |
 | IAM roles + trust policies | Phase 2 |
-| EKS cluster + node group via AWS CLI | Phase 3–4 |
+| EKS cluster via AWS CLI | Phase 3 |
+| Managed node group (AL2023, no launch template) | Phase 4 |
 | OIDC provider + IRSA (pod-level IAM) | Phase 5 |
-| AWS Load Balancer Controller | Phase 5 |
+| AWS Load Balancer Controller via Helm | Phase 5 |
 | Deployment, Service, Ingress, ConfigMap | Phase 6 |
 | ALB provisioned from Kubernetes Ingress | Phase 7 |
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Pods stuck `Pending` longer than 3 min | Auto Mode node not provisioned | Check `kubectl get events` — usually resolves itself |
+| Ingress has no ADDRESS after 5 min | Subnet tags wrong | Ensure `kubernetes.io/cluster/<name>` tag matches cluster name exactly |
+| `no such host` on Windows kubectl | DNS issue on LAN | Change DNS to `8.8.8.8` / `1.1.1.1` or use mobile hotspot |
+| Node group stuck `CREATING` | Wrong AMI or bootstrap script | Use Auto Mode — avoids this entirely |
