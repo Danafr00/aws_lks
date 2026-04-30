@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-app-svc
+  namespace: default
+  labels:
+    app: hello-app
+spec:
+  type: ClusterIP
+  selector:
+    app: hello-app
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
