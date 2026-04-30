@@ -191,7 +191,47 @@ kubectl get svc
 
 ---
 
-## Phase 4 — Node Group
+## Phase 4 — Node Group (Ubuntu 22.04)
+
+EKS managed node groups don't have a built-in Ubuntu option — you need to supply a custom AMI via a launch template.
+
+### 4a. Get Ubuntu EKS-Optimized AMI
+
+Canonical publishes Ubuntu EKS AMIs to SSM. Fetch the latest for Ubuntu 22.04 + Kubernetes 1.29:
+
+```bash
+UBUNTU_AMI=$(aws ssm get-parameter \
+  --name /aws/service/canonical/ubuntu/eks/22.04/1.29/stable/current/amd64/hvm/ebs-gp2/ami-id \
+  --region $AWS_REGION \
+  --query 'Parameter.Value' --output text)
+echo "Ubuntu AMI: $UBUNTU_AMI"
+```
+
+### 4b. Create EC2 Launch Template
+
+The launch template carries only two things: the AMI and the bootstrap userdata. Everything else (instance type, security groups, IAM) is handled by the nodegroup itself.
+
+```bash
+# Bootstrap script — tells the Ubuntu node which cluster to join
+cat > /tmp/userdata.sh << EOF
+#!/bin/bash
+/etc/eks/bootstrap.sh $CLUSTER_NAME
+EOF
+
+USERDATA_B64=$(base64 < /tmp/userdata.sh)
+
+LT_ID=$(aws ec2 create-launch-template \
+  --launch-template-name lks-ubuntu-lt \
+  --launch-template-data "{
+    \"imageId\": \"$UBUNTU_AMI\",
+    \"userData\": \"$USERDATA_B64\"
+  }" \
+  --query 'LaunchTemplate.LaunchTemplateId' --output text)
+
+echo "Launch Template: $LT_ID"
+```
+
+### 4c. Create Node Group
 
 ```bash
 aws eks create-nodegroup \
@@ -200,7 +240,8 @@ aws eks create-nodegroup \
   --node-role $NODE_ROLE_ARN \
   --subnets $SUBNET1_ID $SUBNET2_ID \
   --instance-types t3.small \
-  --ami-type AL2_x86_64 \
+  --ami-type CUSTOM \
+  --launch-template id=$LT_ID,version=1 \
   --scaling-config minSize=1,maxSize=3,desiredSize=2 \
   --region $AWS_REGION
 
@@ -212,7 +253,7 @@ aws eks wait nodegroup-active \
 echo "Node group ACTIVE!"
 
 kubectl get nodes
-# Expected: 2 nodes in Ready state
+# Expected: 2 nodes — OS shown as ubuntu in node labels
 echo "--- Phase 4 done ---"
 ```
 
@@ -379,7 +420,10 @@ sleep 60
 # 2. Uninstall Helm chart
 helm uninstall aws-load-balancer-controller -n kube-system
 
-# 3. Delete node group (wait ~5 min)
+# 3. Delete launch template
+aws ec2 delete-launch-template --launch-template-id $LT_ID
+
+# 4. Delete node group (wait ~5 min)
 aws eks delete-nodegroup \
   --cluster-name $CLUSTER_NAME \
   --nodegroup-name lks-nodes \
@@ -390,12 +434,12 @@ aws eks wait nodegroup-deleted \
   --region $AWS_REGION
 echo "Node group deleted"
 
-# 4. Delete EKS cluster (wait ~5 min)
+# 5. Delete EKS cluster (wait ~5 min)
 aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION
 aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION
 echo "Cluster deleted"
 
-# 5. Delete IAM roles and policies
+# 6. Delete IAM roles and policies
 aws iam detach-role-policy --role-name LKS-LBCRole --policy-arn $LBC_POLICY_ARN
 aws iam delete-role --role-name LKS-LBCRole
 aws iam delete-policy --policy-arn $LBC_POLICY_ARN

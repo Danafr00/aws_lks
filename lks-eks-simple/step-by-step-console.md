@@ -184,19 +184,70 @@ kubectl get svc
 
 ---
 
-## Phase 4 — Node Group
+## Phase 4 — Node Group (Ubuntu 22.04)
 
-1. EKS Console → click cluster `lks-simple-eks` → **Compute** tab → **Add node group**
+EKS managed node groups don't have Ubuntu in the AMI type dropdown — you need to create a **Launch Template** first, then reference it in the node group.
+
+---
+
+### 4a. Get Ubuntu AMI ID (terminal)
+
+Run this in terminal to find the latest Ubuntu 22.04 EKS-optimized AMI for ap-southeast-1:
+
+```bash
+aws ssm get-parameter \
+  --name /aws/service/canonical/ubuntu/eks/22.04/1.29/stable/current/amd64/hvm/ebs-gp2/ami-id \
+  --region ap-southeast-1 \
+  --query 'Parameter.Value' --output text
+```
+
+Copy the returned AMI ID (e.g., `ami-0abc123def456789`).
+
+---
+
+### 4b. Create EC2 Launch Template
+
+1. Open [EC2 Console](https://console.aws.amazon.com/ec2) → left sidebar → **Launch Templates** → **Create launch template**
+
+2. Fill in:
+   - Launch template name: `lks-ubuntu-lt`
+   - Template version description: `Ubuntu 22.04 EKS node`
+
+3. **Application and OS Images** section:
+   - Click **Browse more AMIs**
+   - Click **Enter a custom AMI ID** (bottom of page)
+   - Paste the AMI ID from Step 4a
+   - **Select**
+
+4. **Instance type**: leave blank (will be set by node group)
+
+5. **Key pair**: leave blank (not needed for this lab)
+
+6. **Network settings**: leave blank — do NOT set VPC or security group (EKS manages these)
+
+7. Scroll to **Advanced details** → **User data** field, paste this exactly (replace `lks-simple-eks` only if your cluster name is different):
+
+   ```
+   #!/bin/bash
+   /etc/eks/bootstrap.sh lks-simple-eks
+   ```
+
+8. **Create launch template**
+
+---
+
+### 4c. Create Node Group
+
+1. EKS Console → `lks-simple-eks` → **Compute** tab → **Add node group**
 
 **Step 1 — Configure node group:**
 - Name: `lks-nodes`
 - Node IAM role: `LKS-EKSNodeRole`
-- Leave launch template and other defaults
+- **Launch template**: click toggle → select `lks-ubuntu-lt` → Version `1`
 - **Next**
 
 **Step 2 — Set compute and scaling configuration:**
-- AMI type: `Amazon Linux 2 (AL2_x86_64)`
-- Capacity type: On-Demand
+- AMI type: will show `Custom` (locked because launch template has an AMI)
 - Instance types: `t3.small`
 - Disk size: 20 GiB
 - Scaling configuration:
@@ -207,7 +258,7 @@ kubectl get svc
 
 **Step 3 — Specify networking:**
 - Subnets: select `lks-public-1a` **and** `lks-public-1b`
-- Leave SSH access disabled (not needed for this lab)
+- Leave SSH access disabled
 - **Next**
 
 **Step 4 — Review** → **Create**
@@ -398,7 +449,12 @@ helm uninstall aws-load-balancer-controller -n kube-system
 4. **Overview** tab → **Delete cluster** → type `lks-simple-eks` to confirm
 5. ⏳ Wait for deletion (~5 min)
 
-### 8.3 IAM Console — delete roles and policy
+### 8.3 EC2 Console — delete launch template
+
+1. EC2 Console → **Launch Templates**
+2. Select `lks-ubuntu-lt` → **Actions** → **Delete launch template** → confirm
+
+### 8.4 IAM Console — delete roles and policy
 
 1. **Roles** → delete `LKS-LBCRole`
 2. **Roles** → delete `LKS-EKSNodeRole`
@@ -406,7 +462,7 @@ helm uninstall aws-load-balancer-controller -n kube-system
 4. **Policies** → search `AWSLoadBalancerControllerIAMPolicy` → **Delete**
 5. **Identity providers** → select the OIDC provider → **Delete**
 
-### 8.4 VPC Console — delete networking (in this order)
+### 8.5 VPC Console — delete networking (in this order)
 
 1. **Internet gateways** → select `lks-simple-igw` → **Actions** → **Detach from VPC** → then **Delete**
 2. **Subnets** → delete `lks-public-1a` → delete `lks-public-1b`
