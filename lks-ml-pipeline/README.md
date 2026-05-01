@@ -19,27 +19,70 @@ Tim data science telah membangun model Machine Learning XGBoost yang dapat mende
 
 ## Arsitektur yang Harus Dibangun
 
-### Pipeline Data (Batch)
-```
-S3 (transaksi mentah)
-  → SQS (antrian)
-  → Lambda (feature engineering)
-  → S3 (fitur siap pakai)
-  → Glue ETL (transformasi + partisi)
-  → S3 (data terstruktur / Parquet)
-  → Glue Crawler → Athena (analitik SQL)
-  → SageMaker Training Job
-  → SageMaker Endpoint
-```
+```mermaid
+flowchart TD
+    CSV(["📄 Data Analyst\nUpload CSV"])
+    USER(["👤 Fraud Analyst\nBrowser"])
 
-### Inference API (24/7)
-```
-Amplify (web UI)
-  → API Gateway (HTTP API)
-  → ALB
-  → ECS Fargate (FastAPI — inference server, always-on)
-  → SageMaker Endpoint
-  → DynamoDB (audit trail) + S3 (hasil batch) + JSON response
+    subgraph BATCH["📊 Data Pipeline — Batch Processing"]
+        direction TB
+        S3RAW[("S3 Raw\nlks-paytech-raw")]
+        SQS["SQS\nlks-paytech-queue\nvisibility timeout: 300s"]
+        LAMBDA["Lambda\nlks-feature-trigger\nPython 3.12\nFeature Engineering"]
+        S3FEAT[("S3 Features\nlks-paytech-features")]
+        GLUE["Glue ETL Job\nlks-etl-paytech\nPySpark · Glue 4.0 · G.025X"]
+        S3PROC[("S3 Processed\nlks-paytech-processed\nParquet · partitioned by date")]
+        CRAWLER["Glue Crawler\nlks-crawler-paytech\nhourly schedule"]
+        CATALOG["Glue Data Catalog\nlks_paytech_db"]
+        ATHENA["Athena\nlks-paytech-wg\nSQL Analytics"]
+        TRAINING["SageMaker Training Job\nBuilt-in XGBoost 1.7-1\nml.m5.xlarge"]
+
+        S3RAW -->|"S3 Event Notification\nprefix: data/ · suffix: .csv"| SQS
+        SQS -->|SQS Event Source Mapping| LAMBDA
+        LAMBDA -->|"features CSV\n(log1p + encoded)"| S3FEAT
+        S3FEAT -->|StartJobRun| GLUE
+        GLUE -->|Parquet| S3PROC
+        S3PROC --> CRAWLER
+        CRAWLER -->|update partitions| CATALOG
+        CATALOG --> ATHENA
+        S3PROC -->|"train.csv\nlabel-first · no header"| TRAINING
+    end
+
+    subgraph INFER["🔍 Inference Stack — Always On (24/7)"]
+        direction TB
+        SM_EP["SageMaker Endpoint\nlks-paytech-endpoint\nml.m5.large"]
+        ECS["ECS Fargate\nlks-paytech-cluster\nFastAPI container · port 8080\n512 CPU · 1024 MB"]
+        TG["Target Group\nlks-paytech-tg\ntype: ip · /health"]
+        ALB["ALB\nlks-paytech-alb\ninternet-facing · port 80"]
+        APIGW["API Gateway HTTP API v2\nlks-paytech-api\nCORS · POST /predict · GET /health"]
+        AMPLIFY["AWS Amplify\nlks-paytech-ui\nStatic Web UI"]
+        DDB[("DynamoDB\nlks-paytech-predictions\ntransaction_id + timestamp")]
+        S3RES[("S3 Results\nlks-paytech-results\nJSON per transaction")]
+
+        ECS -->|"boto3 InvokeEndpoint\nCSV feature string"| SM_EP
+        SM_EP -->|fraud probability 0–1| ECS
+        ECS --> DDB
+        ECS --> S3RES
+        TG -->|awsvpc networking| ECS
+        ALB -->|forward port 8080| TG
+        APIGW -->|HTTP Proxy integration| ALB
+        AMPLIFY -->|"HTTPS POST /predict\nJSON transaction"| APIGW
+    end
+
+    CSV -->|"PutObject\ndata/sample_transactions.csv"| S3RAW
+    TRAINING -->|"model.tar.gz\nmodel artifacts"| SM_EP
+    USER -->|HTTPS| AMPLIFY
+    APIGW -->|"JSON response\n{ fraud_score, label, confidence }"| USER
+
+    classDef storage fill:#f0f4ff,stroke:#4a6cf7,stroke-width:2px
+    classDef compute fill:#fff7ed,stroke:#f97316,stroke-width:2px
+    classDef queue fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+    classDef actor fill:#fdf4ff,stroke:#a855f7,stroke-width:2px,shape:stadium
+
+    class S3RAW,S3FEAT,S3PROC,S3RES,DDB storage
+    class LAMBDA,GLUE,TRAINING,ECS,SM_EP compute
+    class SQS,TG queue
+    class CSV,USER actor
 ```
 
 ---
