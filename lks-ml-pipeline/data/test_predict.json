@@ -1,0 +1,12 @@
+{
+  "transaction_id": "txn-test-001",
+  "amount": 4500000,
+  "merchant_category": "electronics",
+  "hour_of_day": 2,
+  "day_of_week": 0,
+  "user_account_age_days": 45,
+  "previous_fraud_count": 1,
+  "distance_from_home_km": 1200.0,
+  "is_foreign_transaction": 1,
+  "transaction_frequency_24h": 18
+}

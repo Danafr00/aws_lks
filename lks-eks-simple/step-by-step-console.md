@@ -4,6 +4,8 @@
 **Note**: Phases 5d, 6, and 7 require a terminal for kubectl/helm — there is no console alternative for Kubernetes resources.  
 **Region**: ap-southeast-1
 
+> **Critical node group rule**: Do NOT use a Launch Template. Do NOT use Ubuntu AMI. Select **Amazon Linux 2023 (AL2023)** as the AMI type — EKS handles the bootstrap automatically. Using a custom AMI or the old `bootstrap.sh` will cause nodes to fail to join the cluster.
+
 ---
 
 ## Timeline
@@ -13,7 +15,7 @@
 | 1 | VPC + Networking | Console | 5 min |
 | 2 | IAM Roles | Console | 3 min |
 | 3 | EKS Cluster | Console | 12 min wait |
-| 4 | Node Group | Console | 5 min wait |
+| 4 | Node Group (AL2023) | Console | 7 min wait |
 | 5a–c | OIDC + LBC IAM | Console | 5 min |
 | 5d | Install LBC | Terminal | 2 min |
 | 6 | Deploy App | Terminal | 2 min |
@@ -73,7 +75,7 @@
 
 ### 1.4 Tag Both Subnets for EKS + ALB
 
-These tags are **required** — the AWS Load Balancer Controller uses them to discover which subnets to put the ALB in.
+These tags are **required** — the AWS Load Balancer Controller uses them to discover which subnets to put the ALB in. The cluster name in the tag must match exactly.
 
 **For `lks-public-1a`:**
 1. Select the subnet → **Tags** tab → **Manage tags** → **Add tag**
@@ -153,7 +155,7 @@ These tags are **required** — the AWS Load Balancer Controller uses them to di
 
 **Step 1 — Configure cluster:**
 - Name: `lks-simple-eks`
-- Kubernetes version: `1.29`
+- Kubernetes version: `1.35`
 - Cluster IAM role: `LKS-EKSClusterRole`
 - Leave everything else default
 - **Next**
@@ -184,70 +186,23 @@ kubectl get svc
 
 ---
 
-## Phase 4 — Node Group (Ubuntu 22.04)
+## Phase 4 — Node Group (AL2023 — no launch template)
 
-EKS managed node groups don't have Ubuntu in the AMI type dropdown — you need to create a **Launch Template** first, then reference it in the node group.
+> **Do not create a Launch Template first.** The EKS console lets you pick the AMI type directly. Using AL2023 without a launch template is the correct and supported way.
 
----
-
-### 4a. Get Ubuntu AMI ID (terminal)
-
-Run this in terminal to find the latest Ubuntu 22.04 EKS-optimized AMI for ap-southeast-1:
-
-```bash
-aws ssm get-parameter \
-  --name /aws/service/canonical/ubuntu/eks/22.04/1.29/stable/current/amd64/hvm/ebs-gp2/ami-id \
-  --region ap-southeast-1 \
-  --query 'Parameter.Value' --output text
-```
-
-Copy the returned AMI ID (e.g., `ami-0abc123def456789`).
-
----
-
-### 4b. Create EC2 Launch Template
-
-1. Open [EC2 Console](https://console.aws.amazon.com/ec2) → left sidebar → **Launch Templates** → **Create launch template**
-
-2. Fill in:
-   - Launch template name: `lks-ubuntu-lt`
-   - Template version description: `Ubuntu 22.04 EKS node`
-
-3. **Application and OS Images** section:
-   - Click **Browse more AMIs**
-   - Click **Enter a custom AMI ID** (bottom of page)
-   - Paste the AMI ID from Step 4a
-   - **Select**
-
-4. **Instance type**: leave blank (will be set by node group)
-
-5. **Key pair**: leave blank (not needed for this lab)
-
-6. **Network settings**: leave blank — do NOT set VPC or security group (EKS manages these)
-
-7. Scroll to **Advanced details** → **User data** field, paste this exactly (replace `lks-simple-eks` only if your cluster name is different):
-
-   ```
-   #!/bin/bash
-   /etc/eks/bootstrap.sh lks-simple-eks
-   ```
-
-8. **Create launch template**
-
----
-
-### 4c. Create Node Group
+### 4a. Create Node Group
 
 1. EKS Console → `lks-simple-eks` → **Compute** tab → **Add node group**
 
 **Step 1 — Configure node group:**
 - Name: `lks-nodes`
 - Node IAM role: `LKS-EKSNodeRole`
-- **Launch template**: click toggle → select `lks-ubuntu-lt` → Version `1`
+- Leave **Launch template** toggle **off** (do not enable it)
 - **Next**
 
 **Step 2 — Set compute and scaling configuration:**
-- AMI type: will show `Custom` (locked because launch template has an AMI)
+- AMI type: **Amazon Linux 2023 (AL2023_x86_64_STANDARD)**
+- Capacity type: On-Demand
 - Instance types: `t3.small`
 - Disk size: 20 GiB
 - Scaling configuration:
@@ -258,12 +213,12 @@ Copy the returned AMI ID (e.g., `ami-0abc123def456789`).
 
 **Step 3 — Specify networking:**
 - Subnets: select `lks-public-1a` **and** `lks-public-1b`
-- Leave SSH access disabled
+- SSH access: leave disabled (or enable with a key pair if you want SSH)
 - **Next**
 
 **Step 4 — Review** → **Create**
 
-> ⏳ Wait ~5 minutes for Status to show **Active**
+> ⏳ Wait ~7 minutes for Status to show **Active**
 
 Verify nodes in terminal:
 ```bash
@@ -449,12 +404,7 @@ helm uninstall aws-load-balancer-controller -n kube-system
 4. **Overview** tab → **Delete cluster** → type `lks-simple-eks` to confirm
 5. ⏳ Wait for deletion (~5 min)
 
-### 8.3 EC2 Console — delete launch template
-
-1. EC2 Console → **Launch Templates**
-2. Select `lks-ubuntu-lt` → **Actions** → **Delete launch template** → confirm
-
-### 8.4 IAM Console — delete roles and policy
+### 8.3 IAM Console — delete roles and policy
 
 1. **Roles** → delete `LKS-LBCRole`
 2. **Roles** → delete `LKS-EKSNodeRole`
@@ -462,7 +412,7 @@ helm uninstall aws-load-balancer-controller -n kube-system
 4. **Policies** → search `AWSLoadBalancerControllerIAMPolicy` → **Delete**
 5. **Identity providers** → select the OIDC provider → **Delete**
 
-### 8.5 VPC Console — delete networking (in this order)
+### 8.4 VPC Console — delete networking (in this order)
 
 1. **Internet gateways** → select `lks-simple-igw` → **Actions** → **Detach from VPC** → then **Delete**
 2. **Subnets** → delete `lks-public-1a` → delete `lks-public-1b`
@@ -486,9 +436,22 @@ Service: hello-app-svc (ClusterIP :80)
     ├── Pod 1: nginx + hello-html
     └── Pod 2: nginx + hello-html
 
-        EKS Cluster (1.29)         ← EKS Console → Clusters
+        EKS Cluster (1.35)             ← EKS Console → Clusters
         └── Node Group: 2x t3.small
-            └── VPC 10.0.0.0/16    ← VPC Console → Your VPCs
+            └── AMI: AL2023 (no launch template)
+            └── VPC 10.0.0.0/16        ← VPC Console → Your VPCs
                 ├── 10.0.1.0/24  ap-southeast-1a
                 └── 10.0.2.0/24  ap-southeast-1b
 ```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Node group stuck `CREATING` >10 min | Wrong AMI type or launch template | Delete node group, create again with AL2023 AMI type and no launch template |
+| Nodes join but immediately `NotReady` | CNI plugin not running | Check `kubectl get pods -n kube-system` — VPC CNI pod must be `Running` |
+| Ingress has no ADDRESS after 5 min | Subnet tags wrong cluster name | Ensure `kubernetes.io/cluster/lks-simple-eks` tag is on both subnets |
+| LBC pod `CrashLoopBackOff` | IAM role condition wrong | Re-check trust policy has exact service account name and OIDC ID |
+| `no such host` on Windows kubectl | IPv6 DNS from router overriding IPv4 | Set LAN DNS to `8.8.8.8` / `1.1.1.1`, or use phone hotspot |
