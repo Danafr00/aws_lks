@@ -4,8 +4,14 @@ set -e
 AWS_REGION="${AWS_REGION:-ap-southeast-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
-SM_ROLE_ARN=$(aws iam get-role --role-name LKS-SageMakerRole --query 'Role.Arn' --output text)
 DATA_DIR="$(dirname "$0")/../data"
+
+SM_ROLE_ARN=$(aws iam get-role --role-name LKS-SageMakerRole --query 'Role.Arn' --output text 2>/dev/null || true)
+if [[ -z "$SM_ROLE_ARN" || "$SM_ROLE_ARN" == "None" ]]; then
+  echo "ERROR: LKS-SageMakerRole not found. Run 02-create-iam.sh first."
+  exit 1
+fi
+echo "  Using role: $SM_ROLE_ARN"
 
 echo "==> Uploading training data to S3..."
 aws s3 cp "${DATA_DIR}/train.csv" \
@@ -14,12 +20,16 @@ aws s3 cp "${DATA_DIR}/validation.csv" \
   "s3://${PROCESSED_BUCKET}/training/validation.csv"
 
 echo "==> Resolving XGBoost image URI..."
-IMAGE_URI=$(aws sagemaker list-algorithms \
-  --query "AlgorithmSummaryList[?AlgorithmName=='xgboost'].AlgorithmArn" \
-  --output text 2>/dev/null || true)
-
-# Use the built-in container URI directly
-IMAGE_URI="683313688378.dkr.ecr.${AWS_REGION}.amazonaws.com/sagemaker-xgboost:1.7-1"
+IMAGE_URI=$(python3 -c "
+import sagemaker, boto3
+print(sagemaker.image_uris.retrieve(
+    framework='xgboost',
+    region='${AWS_REGION}',
+    version='1.7-1',
+    image_scope='training',
+    instance_type='ml.m5.xlarge'
+))")
+echo "  Image URI: ${IMAGE_URI}"
 
 TRAINING_JOB="lks-paytech-training-$(date +%Y%m%d%H%M%S)"
 echo "==> Starting SageMaker training job: $TRAINING_JOB"
