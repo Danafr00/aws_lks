@@ -195,7 +195,7 @@ NODE_ROLE_ARN=$(aws iam get-role --role-name LKS-EKSNodeRole \
 echo "Node Role: $NODE_ROLE_ARN"
 
 # ── Download LBC IAM policy ───────────────────────────────────
-curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
 aws iam create-policy \
   --policy-name AWSLoadBalancerControllerIAMPolicy \
   --policy-document file://iam_policy.json
@@ -233,10 +233,10 @@ aws eks create-nodegroup \
   --nodegroup-name lks-wallet-ng \
   --node-role $NODE_ROLE_ARN \
   --subnets $PRIV1 $PRIV2 \
-  --instance-types t3.small \
+  --instance-types m7i-flex.large \
   --ami-type AL2023_x86_64_STANDARD \
   --disk-size 20 \
-  --scaling-config minSize=1,maxSize=2,desiredSize=1 \
+  --scaling-config minSize=2,maxSize=4,desiredSize=2 \
   --remote-access ec2SshKey=lks-eks-key,sourceSecurityGroups=$NODE_SG \
   --region $AWS_REGION
 
@@ -1088,7 +1088,7 @@ Internet
 ALB  (internet-facing, public subnets)
     │
     ▼
-wallet-app pods  (private subnets, t3.small)
+wallet-app pods  (private subnets, m7i-flex.large)
     ├── ConfigMap        → non-sensitive env vars (DB_HOST, PORT, etc.)
     ├── ExternalSecret   → DB_PASSWORD + JWT_SECRET from Secrets Manager
     ├── EFS PVC          → /app/uploads  (ReadWriteMany across pods)

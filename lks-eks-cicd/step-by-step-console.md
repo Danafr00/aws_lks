@@ -201,7 +201,7 @@ Note the Security Group ID — you will need it when creating the node group.
 
 First download the policy JSON (terminal):
 ```bash
-curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
 ```
 
 Then in console:
@@ -238,11 +238,28 @@ Then in console:
 
 > ⏳ Wait ~12 minutes for Status: **Active**
 
-Connect kubectl (terminal):
+Grant your CLI identity cluster-admin access (terminal):
 ```bash
 export AWS_REGION=ap-southeast-1
 export CLUSTER_NAME=lks-wallet-eks
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CLI_ARN=$(aws sts get-caller-identity --query Arn --output text)
+
+aws eks create-access-entry \
+  --cluster-name $CLUSTER_NAME \
+  --principal-arn $CLI_ARN \
+  --region $AWS_REGION
+
+aws eks associate-access-policy \
+  --cluster-name $CLUSTER_NAME \
+  --principal-arn $CLI_ARN \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster \
+  --region $AWS_REGION
+```
+
+Connect kubectl (terminal):
+```bash
 aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 kubectl get svc
 ```
@@ -264,9 +281,9 @@ kubectl get svc
 **Step 2 — Compute and scaling:**
 - AMI type: **Amazon Linux 2023 (AL2023_x86_64_STANDARD)**
 - Capacity type: **On-Demand**
-- Instance types: `t3.small`
+- Instance types: `m7i-flex.large`
 - Disk size: 20 GiB
-- Scaling: Minimum `1` | Maximum `2` | Desired `1`
+- Scaling: Minimum `2` | Maximum `4` | Desired `2`
 - **Next**
 
 **Step 3 — Networking:**
@@ -1136,7 +1153,7 @@ Internet
 ALB  (internet-facing, public subnets)
     │
     ▼
-wallet-app pods  (private subnets, t3.small, AL2023)
+wallet-app pods  (private subnets, m7i-flex.large, AL2023)
     ├── ConfigMap        → DB_HOST, PORT, etc.
     ├── ExternalSecret   → DB_PASSWORD + JWT_SECRET from Secrets Manager
     ├── EFS PVC          → /app/uploads  (ReadWriteMany)
