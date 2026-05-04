@@ -470,21 +470,116 @@ aws cloudwatch put-metric-alarm \
 
 ---
 
-## Task 8 – End-to-End Validation
+## Task 8 – End-to-End Testing and Validation
+
+### Step 1: Upload test data to S3 (trigger the pipeline)
+
+Upload `data/sample_sales.csv` to the raw bucket under the `data/sales/` prefix. This fires the EventBridge rule → Lambda → Glue job chain.
 
 ```bash
-# Run all validation checks
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-bash scripts/06-validate.sh
+
+aws s3 cp data/sample_sales.csv \
+  s3://lks-analytics-raw-${ACCOUNT_ID}/data/sales/2024/01/15/sample_sales.csv
 ```
 
-**Manual validation queries in Athena (workgroup: `lks-analytics-wg`):**
+**Console alternative:**
+1. S3 → `lks-analytics-raw-{ACCOUNT_ID}` → Upload
+2. Create folder path: `data/sales/2024/01/15/`
+3. Upload `sample_sales.csv` into that folder
 
+### Step 2: Verify Lambda was triggered
+
+Wait ~10 seconds, then check Lambda logs to confirm it received the S3 event and started the Glue job:
+
+```bash
+aws logs tail /aws/lambda/lks-glue-trigger --since 2m
+```
+
+**Expected log output:**
+```
+Starting Glue job lks-etl-sales for s3://lks-analytics-raw-.../data/sales/2024/01/15/sample_sales.csv
+Glue job started. JobRunId: jr_...
+```
+
+If the log is empty, the EventBridge rule is not routing to Lambda — recheck Step 2 of Task 5.
+
+### Step 3: Monitor the Glue job run
+
+```bash
+aws glue get-job-runs \
+  --job-name lks-etl-sales \
+  --region ap-southeast-1 \
+  --max-results 1 \
+  --query 'JobRuns[0].{State:JobRunState,Started:StartedOn,Duration:ExecutionTime}' \
+  --output table
+```
+
+**Expected states (in order):** `STARTING` → `RUNNING` → `SUCCEEDED`
+
+G.025X workers take 2–4 minutes to spin up. Wait for `SUCCEEDED` before proceeding.
+
+```bash
+# Poll until done (check every 30s)
+watch -n 30 "aws glue get-job-runs --job-name lks-etl-sales --region ap-southeast-1 \
+  --max-results 1 --query 'JobRuns[0].JobRunState' --output text"
+```
+
+### Step 4: Verify Parquet output in processed bucket
+
+```bash
+aws s3 ls s3://lks-analytics-processed-${ACCOUNT_ID}/sales/ --recursive
+```
+
+**Expected output** — Parquet files partitioned by year/month/day:
+```
+2024-01-15 ...  sales/year=2024/month=01/day=15/part-00000-....parquet
+```
+
+If no files appear, the Glue job failed. Check full error:
+```bash
+aws glue get-job-runs --job-name lks-etl-sales --region ap-southeast-1 \
+  --max-results 1 --query 'JobRuns[0].ErrorMessage' --output text
+```
+
+### Step 5: Run Glue Crawler to register table in Data Catalog
+
+```bash
+aws glue start-crawler --name lks-crawler-sales --region ap-southeast-1
+
+# Wait ~60s, then verify the table was created
+aws glue get-table \
+  --database-name lks_analytics_db \
+  --name sales \
+  --region ap-southeast-1 \
+  --query 'Table.{Name:Name,Location:StorageDescriptor.Location,Columns:StorageDescriptor.Columns[*].Name}' \
+  --output json
+```
+
+**Expected:** a `sales` table with columns `transaction_id, store_id, product_id, product_name, category, quantity, unit_price, amount, sale_date, payment_method, year, month, day`.
+
+### Step 6: Query with Athena (workgroup: `lks-analytics-wg`)
+
+Open Athena → switch to workgroup `lks-analytics-wg` → run these queries one by one.
+
+**Query 1 — Total row count**
 ```sql
--- Check partitions were discovered
-SHOW PARTITIONS lks_analytics_db.sales;
+SELECT COUNT(*) AS row_count FROM lks_analytics_db.sales;
+```
+> **Expected:** `10`
 
--- Total sales by store
+---
+
+**Query 2 — Check partitions**
+```sql
+SHOW PARTITIONS lks_analytics_db.sales;
+```
+> **Expected:** `year=2024/month=01/day=15`
+
+---
+
+**Query 3 — Revenue by store (highest first)**
+```sql
 SELECT store_id,
        SUM(amount)  AS total_revenue,
        COUNT(*)     AS tx_count
@@ -492,26 +587,75 @@ FROM lks_analytics_db.sales
 WHERE year = '2024' AND month = '01'
 GROUP BY store_id
 ORDER BY total_revenue DESC;
+```
 
--- Revenue by category
+> **Expected results:**
+>
+> | store_id     | total_revenue | tx_count |
+> |---|---|---|
+> | STORE-SBY-01 | 165000        | 2        |
+> | STORE-JKT-02 | 112500        | 2        |
+> | STORE-MDN-01 | 52000         | 2        |
+> | STORE-JKT-01 | 27500         | 2        |
+> | STORE-BDG-01 | 25500         | 2        |
+
+---
+
+**Query 4 — Revenue by category**
+```sql
 SELECT category,
        SUM(amount)   AS revenue,
        SUM(quantity) AS units_sold
 FROM lks_analytics_db.sales
 GROUP BY category
 ORDER BY revenue DESC;
-
--- Payment method breakdown
-SELECT payment_method, COUNT(*) AS count, SUM(amount) AS total
-FROM lks_analytics_db.sales
-GROUP BY payment_method
-ORDER BY count DESC;
 ```
 
-**Expected results from sample data:**
-- `STORE-SBY-01` has the highest revenue (Beras Premium 5kg + Indomie bulk)
-- `food` and `staple` are the top categories
-- `cash` and `qris` are the most common payment methods
+> **Expected results:**
+>
+> | category      | revenue | units_sold |
+> |---|---|---|
+> | food          | 165000  | 23         |
+> | staple        | 165000  | 3          |
+> | personal_care | 17000   | 2          |
+> | beverage      | 23500   | 5          |
+> | snack         | 12000   | 1          |
+
+---
+
+**Query 5 — Payment method breakdown**
+```sql
+SELECT payment_method, COUNT(*) AS tx_count, SUM(amount) AS total
+FROM lks_analytics_db.sales
+GROUP BY payment_method
+ORDER BY tx_count DESC;
+```
+
+> **Expected results:**
+>
+> | payment_method | tx_count | total  |
+> |---|---|---|
+> | cash           | 4        | 102000 |
+> | qris           | 3        | 62000  |
+> | debit_card     | 2        | 88500  |
+> | transfer       | 1        | 130000 |
+
+### Step 7: Run automated validation script
+
+```bash
+bash scripts/06-validate.sh
+```
+
+**Expected final output:**
+```
+================================================================
+ VALIDATION SUMMARY
+================================================================
+  PASS: 8
+  FAIL: 0
+  STATUS: ALL CHECKS PASSED
+================================================================
+```
 
 ---
 
