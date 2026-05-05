@@ -479,6 +479,8 @@ curl http://$ALB
 
 ### 2.2 Build + Push + Update Deployment (Terminal)
 
+> **Apple Silicon Mac (M1/M2/M3):** EKS nodes are `amd64`. Build with `--platform linux/amd64` or the pod gets `ImagePullBackOff: no match for platform in manifest`.
+
 ```bash
 export ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/lks-wallet-api"
 
@@ -487,23 +489,31 @@ aws ecr get-login-password --region $AWS_REGION \
   | docker login --username AWS --password-stdin \
   ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-# Build and push (from lks-eks-cicd/app/ directory)
+# Build for amd64 and push (from lks-eks-cicd/app/ directory)
 cd app/
-docker build -t lks-wallet-api:v1.0.0 .
-docker tag lks-wallet-api:v1.0.0 ${ECR_URI}:v1.0.0
-docker push ${ECR_URI}:v1.0.0
+docker buildx build --platform linux/amd64 \
+  -t ${ECR_URI}:v1.0.0 --push .
 
-# Update deployment to use ECR image
-kubectl set image deployment/wallet-app app=${ECR_URI}:v1.0.0 -n wallet
-kubectl rollout status deployment/wallet-app -n wallet
+# Delete hello-app — it has served its purpose
+kubectl delete deployment wallet-app -n wallet
+echo "Hello-app removed."
 
-curl http://$ALB/health/live
-# Expected: HTTP 200
+# Apply real deployment + service (service.yaml updates selector to app: wallet-api)
+# Keep the Layer 1 wallet-ingress for HTTP testing
+# k8s/ingress.yaml is production HTTPS — apply in Layer 6 after ACM cert setup
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" k8s/deployment.yaml | kubectl apply -f -
+kubectl apply -f k8s/service.yaml
+
+# Pods will CrashLoop until Layer 3 provides ConfigMap + Secret — expected
+echo "Pods pending config — continue to Layer 3."
+kubectl get pods -n wallet
 ```
 
+> **ECR immutable tags:** If you need to re-push the same tag (e.g., after fixing platform), disable immutability first in the ECR console: `lks-wallet-api` → **Edit** → Tag immutability: **Disabled**. Or use a new tag (`v1.0.1`).
+
 **Layer 2 checkpoint:**
-- [ ] ECR repo shows image `v1.0.0` in console
-- [ ] App responds on `/health/live`
+- [ ] ECR repo shows image in console
+- [ ] `kubectl get deployment wallet-api -n wallet` exists
 
 ---
 
@@ -515,9 +525,12 @@ curl http://$ALB/health/live
    - Name: `lks-rds-sg`
    - Description: `RDS PostgreSQL`
    - VPC: `lks-wallet-vpc`
-2. **Inbound rules** → **Add rule**:
-   - Type: **PostgreSQL** | Port: 5432 | Source: **Custom** → type `lks-eks-node-sg` (select it)
+2. **Inbound rules** → **Add rule** (add **two** rules):
+   - Rule 1: Type: **PostgreSQL** | Port: 5432 | Source: **Custom** → `lks-eks-node-sg`
+   - Rule 2: Type: **PostgreSQL** | Port: 5432 | Source: **Custom** → `eks-cluster-sg-lks-wallet-eks-*` (the auto-created cluster SG — find it by searching `lks-wallet-eks` in the SG search box)
 3. **Create security group**
+
+> **Why two rules?** EKS auto-creates a cluster SG and attaches it to every pod. The `lks-eks-node-sg` covers SSH but pods egress through the cluster SG. Without it, pods get connection timeout even though the node SG is allowed.
 
 ---
 
@@ -585,32 +598,40 @@ DB_ENDPOINT=$(aws rds describe-db-instances \
   --query 'DBInstances[0].Endpoint.Address' --output text)
 echo "DB: $DB_ENDPOINT"
 
-kubectl apply -f - << EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: wallet-config
-  namespace: wallet
-data:
-  APP_ENV: production
-  APP_PORT: "8080"
-  DB_HOST: "${DB_ENDPOINT}"
-  DB_PORT: "5432"
-  DB_NAME: wallet_db
-  DB_USER: walletadmin
-  UPLOAD_PATH: /app/uploads
-EOF
+sed "s|<RDS_ENDPOINT>|$DB_ENDPOINT|g" k8s/configmap.yaml | kubectl apply -f -
+```
 
-kubectl set env deployment/wallet-app --from=configmap/wallet-config -n wallet
-kubectl rollout status deployment/wallet-app -n wallet
+### 3.5 Inject DB Password (Terminal)
 
-# Test DB connectivity from inside the pod
-POD=$(kubectl get pod -n wallet -l app=wallet-app -o jsonpath='{.items[0].metadata.name}')
+RDS stored the password in Secrets Manager. Pull it and inject into the deployment. (Layer 5 replaces this with ExternalSecrets.)
+
+```bash
+DB_SECRET_ARN=$(aws rds describe-db-instances \
+  --db-instance-identifier lks-wallet-db \
+  --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)
+
+DB_PASSWORD=$(aws secretsmanager get-secret-value \
+  --secret-id "$DB_SECRET_ARN" \
+  --query 'SecretString' --output text \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+kubectl create secret generic wallet-api-secret \
+  --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+  -n wallet
+
+kubectl rollout restart deployment/wallet-api -n wallet
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
+
+# Test
+POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -it $POD -n wallet -- sh -c "nc -zv $DB_ENDPOINT 5432 && echo 'DB reachable!'"
+kubectl logs $POD -n wallet | tail -5
+# Expected: "Migration complete" and "Listening on :8080"
 ```
 
 **Layer 3 checkpoint:**
 - [ ] `nc` shows DB port is reachable
+- [ ] Pod logs show `Migration complete` and `Listening on :8080`
 - [ ] `/health/ready` returns 200
 
 ---
@@ -728,58 +749,31 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 
 ### 4.5 Mount EFS into Pods (Terminal)
 
+`deployment.yaml` already has the EFS volume mount defined — no patch needed.
+
 ```bash
 EFS_ID=$(aws efs describe-file-systems \
   --query 'FileSystems[?Name==`lks-wallet-storage`].FileSystemId' \
   --output text)
 echo "EFS: $EFS_ID"
 
-# StorageClass
-kubectl apply -f - << EOF
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: efs-sc
-provisioner: efs.csi.aws.com
-parameters:
-  provisioningMode: efs-ap
-  fileSystemId: ${EFS_ID}
-  directoryPerms: "700"
-EOF
+sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/storage-class.yaml | kubectl apply -f -
+kubectl apply -f k8s/pvc.yaml
 
-# PVC
-kubectl apply -f - << 'EOF'
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: wallet-uploads-pvc
-  namespace: wallet
-spec:
-  accessModes:
-  - ReadWriteMany
-  storageClassName: efs-sc
-  resources:
-    requests:
-      storage: 5Gi
-EOF
+echo "Waiting for PVC to bind..."
+kubectl wait pvc/wallet-uploads-pvc -n wallet --for=jsonpath='{.status.phase}'=Bound --timeout=60s
+kubectl get pvc -n wallet
 
-# Mount into deployment
-kubectl patch deployment wallet-app -n wallet --type='json' -p='[
-  {"op": "add", "path": "/spec/template/spec/volumes", "value": [
-    {"name": "uploads", "persistentVolumeClaim": {"claimName": "wallet-uploads-pvc"}}
-  ]},
-  {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts", "value": [
-    {"name": "uploads", "mountPath": "/app/uploads"}
-  ]}
-]'
+kubectl rollout restart deployment/wallet-api -n wallet
 
-kubectl rollout status deployment/wallet-app -n wallet
+kubectl apply -f k8s/storage-class.yaml
+kubectl rollout status deployment/wallet-api -n wallet
 
 # Test ReadWriteMany — scale to 2 pods
-kubectl scale deployment wallet-app -n wallet --replicas=2
-kubectl wait --for=condition=ready pod -l app=wallet-app -n wallet --timeout=60s
+kubectl scale deployment wallet-api -n wallet --replicas=2
+kubectl wait --for=condition=ready pod -l app=wallet-api -n wallet --timeout=60s
 
-PODS=($(kubectl get pods -n wallet -l app=wallet-app -o name))
+PODS=($(kubectl get pods -n wallet -l app=wallet-api -o name))
 kubectl exec -n wallet ${PODS[0]} -- sh -c "echo 'hello from pod1' > /app/uploads/test.txt"
 kubectl exec -n wallet ${PODS[1]} -- cat /app/uploads/test.txt
 # Expected: hello from pod1
@@ -857,6 +851,11 @@ Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager
 
 ### 5.3 Install ESO + Pull Secrets (Terminal)
 
+> **Delete the manual secret from Layer 3 first.** ExternalSecret uses `creationPolicy: Owner` — it won't adopt a secret it didn't create.
+> ```bash
+> kubectl delete secret wallet-api-secret -n wallet
+> ```
+
 ```bash
 export WALLET_ROLE_ARN=$(aws iam get-role --role-name LKS-WalletAppRole \
   --query 'Role.Arn' --output text)
@@ -920,19 +919,11 @@ EOF
 kubectl get externalsecret wallet-secrets -n wallet
 # Expected: SecretSynced
 
-# Inject secrets into deployment
-kubectl patch deployment wallet-app -n wallet --type='json' -p='[
-  {"op": "replace", "path": "/spec/template/spec/serviceAccountName", "value": "wallet-api-sa"},
-  {"op": "add", "path": "/spec/template/spec/containers/0/envFrom", "value": [
-    {"configMapRef": {"name": "wallet-config"}},
-    {"secretRef": {"name": "wallet-secrets"}}
-  ]}
-]'
-
-kubectl rollout status deployment/wallet-app -n wallet
+kubectl rollout restart deployment/wallet-api -n wallet
+kubectl rollout status deployment/wallet-api -n wallet
 
 # Verify secrets are injected (names only, not values)
-POD=$(kubectl get pod -n wallet -l app=wallet-app -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | cut -d= -f1"
 # Expected: DB_PASSWORD  JWT_SECRET
 ```
@@ -1153,7 +1144,7 @@ Internet
 ALB  (internet-facing, public subnets)
     │
     ▼
-wallet-app pods  (private subnets, m7i-flex.large, AL2023)
+wallet-api pods  (private subnets, m7i-flex.large, AL2023)
     ├── ConfigMap        → DB_HOST, PORT, etc.
     ├── ExternalSecret   → DB_PASSWORD + JWT_SECRET from Secrets Manager
     ├── EFS PVC          → /app/uploads  (ReadWriteMany)
@@ -1176,5 +1167,10 @@ GitHub Actions (on push to main):
 | LBC pods not ready after 5 min | IAM trust policy wrong OIDC ID or SA name | Re-check trust policy condition in IAM |
 | Ingress has no ADDRESS | Subnet tags missing or wrong cluster name | Verify all 4 subnets have `kubernetes.io/cluster/lks-wallet-eks` tag |
 | `ExternalSecret` not syncing | App role can't read Secrets Manager | Check role policy has the correct secret ARN pattern |
-| EFS PVC stuck `Pending` | EFS CSI driver not running | Check `kubectl get pods -n kube-system | grep efs` |
+| EFS PVC stuck `Pending` | EFS CSI driver not running | Check `kubectl get pods -n kube-system \| grep efs` |
 | GitHub Actions `Unauthorized` to EKS | Access entry missing | Run `aws eks create-access-entry` + `associate-access-policy` |
+| `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
+| ALB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
+| Pod connection timeout to RDS despite SG rule | Rule allows `lks-eks-node-sg` but pods use the auto-created EKS cluster SG | Add inbound rule for `eks-cluster-sg-lks-wallet-eks-*` SG on port 5432 |
+| App restarts with `DB not ready` even after RDS fix | `DB_PASSWORD` env var missing — app can't auth | Create `wallet-api-secret` from Secrets Manager and patch deployment (see step 3.5) |
+| ECR push fails `tag already exists and cannot be overwritten` | ECR immutable tags enabled | Disable immutability in ECR console or use a new tag version |
