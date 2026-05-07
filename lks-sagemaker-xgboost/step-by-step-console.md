@@ -93,169 +93,206 @@ aws s3 cp data/validation.csv s3://lks-sagemaker-data-${ACCOUNT_ID}/validation/v
 6. Click **Create notebook instance**
 7. Wait ~3 minutes for status to change to **InService**
 
-### 2.2 Upload training script to notebook
+### 2.2 Open JupyterLab
 
-Once InService → click **Open JupyterLab**
+Once status = `InService` → click **Open JupyterLab**
 
-In JupyterLab:
-1. Click the **Upload** icon (up arrow) in the file browser
-2. Upload `training/train_deploy.py` from your local machine
-3. Upload `training/prepare_data.py` (optional)
+> No file uploads needed — all training code runs inline via boto3.
 
 **Layer 2 checkpoint — verify before continuing:**
 - [ ] Notebook Instance status = `InService` in SageMaker console
 - [ ] JupyterLab opens in browser
-- [ ] `train_deploy.py` visible in file browser
 
 ---
 
 ## Layer 3 — XGBoost Training Job (inside notebook)
 
 > All cells below run INSIDE JupyterLab on the notebook instance. The instance runs as `LabRole`, so `CreateTrainingJob` is allowed.
+> Uses **boto3 directly** — no SageMaker SDK import, no version issues.
 
 ### 3.1 Open a new notebook
 
 In JupyterLab → **File** → **New** → **Notebook** → Kernel: **conda_python3**
 
-### 3.2 Install dependencies
+### 3.2 Run training job (boto3 only)
+
+Paste this entire cell and run:
 
 ```python
-!pip install -q sagemaker boto3 --upgrade
-```
-
-### 3.3 Run training job
-
-Paste this into a cell and run:
-
-```python
-import boto3
-import sagemaker
-from sagemaker import image_uris
-from sagemaker.estimator import Estimator
-from sagemaker.inputs import TrainingInput
-import time
+import boto3, time
 
 REGION = 'us-east-1'
+sm = boto3.client('sagemaker', region_name=REGION)
 ACCOUNT_ID = boto3.client('sts', region_name=REGION).get_caller_identity()['Account']
 ROLE_ARN = f'arn:aws:iam::{ACCOUNT_ID}:role/LabRole'
 DATA_BUCKET = f'lks-sagemaker-data-{ACCOUNT_ID}'
 MODEL_BUCKET = f'lks-sagemaker-models-{ACCOUNT_ID}'
+CONTAINER = f'683313688378.dkr.ecr.{REGION}.amazonaws.com/sagemaker-xgboost:1.7-1'
+JOB_NAME = f'lks-loan-xgb-{int(time.time())}'
 
-print(f"Account: {ACCOUNT_ID}")
-print(f"Role:    {ROLE_ARN}")
-print(f"Data:    s3://{DATA_BUCKET}")
-print(f"Models:  s3://{MODEL_BUCKET}")
+print(f"Account:   {ACCOUNT_ID}")
+print(f"Role:      {ROLE_ARN}")
+print(f"Job name:  {JOB_NAME}")
+print(f"Container: {CONTAINER}")
 
-boto_session = boto3.Session(region_name=REGION)
-sm_session = sagemaker.Session(boto_session=boto_session)
-
-container = image_uris.retrieve('xgboost', REGION, '1.7-1')
-print(f"Container: {container}")
-
-estimator = Estimator(
-    image_uri=container,
-    role=ROLE_ARN,
-    instance_count=1,
-    instance_type='ml.m5.xlarge',
-    volume_size=10,
-    max_run=600,
-    output_path=f's3://{MODEL_BUCKET}/model-output/',
-    sagemaker_session=sm_session,
-    tags=[
+sm.create_training_job(
+    TrainingJobName=JOB_NAME,
+    RoleArn=ROLE_ARN,
+    AlgorithmSpecification={
+        'TrainingImage': CONTAINER,
+        'TrainingInputMode': 'File',
+    },
+    HyperParameters={
+        'objective': 'binary:logistic',
+        'num_round': '150',
+        'max_depth': '5',
+        'eta': '0.2',
+        'subsample': '0.8',
+        'colsample_bytree': '0.8',
+        'min_child_weight': '1',
+        'eval_metric': 'auc',
+        'scale_pos_weight': '3',
+    },
+    InputDataConfig=[
+        {
+            'ChannelName': 'train',
+            'ContentType': 'text/csv',
+            'DataSource': {'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': f's3://{DATA_BUCKET}/train/',
+                'S3DataDistributionType': 'FullyReplicated',
+            }},
+        },
+        {
+            'ChannelName': 'validation',
+            'ContentType': 'text/csv',
+            'DataSource': {'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': f's3://{DATA_BUCKET}/validation/',
+                'S3DataDistributionType': 'FullyReplicated',
+            }},
+        },
+    ],
+    OutputDataConfig={'S3OutputPath': f's3://{MODEL_BUCKET}/model-output/'},
+    ResourceConfig={
+        'InstanceType': 'ml.m5.xlarge',
+        'InstanceCount': 1,
+        'VolumeSizeInGB': 10,
+    },
+    StoppingCondition={'MaxRuntimeInSeconds': 600},
+    Tags=[
         {'Key': 'Project', 'Value': 'nusantara-fincredit'},
         {'Key': 'Environment', 'Value': 'production'},
         {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
     ],
 )
 
-estimator.set_hyperparameters(
-    objective='binary:logistic',
-    num_round=150,
-    max_depth=5,
-    eta=0.2,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    min_child_weight=1,
-    eval_metric='auc',
-    scale_pos_weight=3,
-)
+print(f"\nStarted: {JOB_NAME} — polling every 30s...")
 
-train_input = TrainingInput(
-    s3_data=f's3://{DATA_BUCKET}/train/',
-    content_type='text/csv',
-)
-val_input = TrainingInput(
-    s3_data=f's3://{DATA_BUCKET}/validation/',
-    content_type='text/csv',
-)
+# Poll until complete
+while True:
+    resp = sm.describe_training_job(TrainingJobName=JOB_NAME)
+    status = resp['TrainingJobStatus']
+    print(f"  Status: {status}")
+    if status in ('Completed', 'Failed', 'Stopped'):
+        break
+    time.sleep(30)
 
-job_name = f'lks-loan-xgb-{int(time.time())}'
-print(f"\nStarting: {job_name}")
-
-estimator.fit(
-    inputs={'train': train_input, 'validation': val_input},
-    job_name=job_name,
-    wait=True,
-    logs=True,
-)
-
-print(f"\nModel artifacts: {estimator.model_data}")
-MODEL_DATA = estimator.model_data
+if status == 'Completed':
+    MODEL_DATA = resp['ModelArtifacts']['S3ModelArtifacts']
+    print(f"\nDone. Model: {MODEL_DATA}")
+else:
+    print(f"\nFailed: {resp.get('FailureReason')}")
 ```
 
-Expected time: **3–5 minutes**. Watch for `[0]#011train-auc:...` lines in logs.
+Expected time: **3–5 minutes**.
 
-### 3.4 Note the model artifacts path
+### 3.3 Note the model artifacts path
 
-After training completes, copy the `model_data` path shown in output — looks like:
+After training completes, `MODEL_DATA` variable holds the path — looks like:
 ```
 s3://lks-sagemaker-models-237675846062/model-output/lks-loan-xgb-1234567890/output/model.tar.gz
 ```
 
 **Layer 3 checkpoint — verify before continuing:**
-- [ ] Cell runs without error
-- [ ] Final log shows `[149]#011train-auc:` value
+- [ ] Cell runs without error, final status = `Completed`
 - [ ] SageMaker console → Training jobs → job status = `Completed`
-- [ ] `aws s3 ls s3://lks-sagemaker-models-${ACCOUNT_ID}/model-output/` shows the job folder
+- [ ] `MODEL_DATA` variable printed in output
 
 ---
 
 ## Layer 4 — SageMaker Endpoint (inside notebook)
 
-### 4.1 Deploy endpoint (same notebook, next cell)
+### 4.1 Create model + endpoint config + endpoint (boto3 only)
+
+Next cell in same notebook — `MODEL_DATA`, `CONTAINER`, `ROLE_ARN`, `REGION` still in memory from Layer 3:
 
 ```python
-from sagemaker.model import Model
-
 ENDPOINT_NAME = 'lks-loan-risk-endpoint'
+MODEL_NAME = 'lks-loan-risk-model'
+CONFIG_NAME = 'lks-loan-risk-config'
 
-# If continuing from Layer 3 cell above, estimator is still in memory.
-# Otherwise, set MODEL_DATA manually:
-# MODEL_DATA = 's3://lks-sagemaker-models-237675846062/model-output/.../output/model.tar.gz'
-
-model = Model(
-    image_uri=container,
-    model_data=MODEL_DATA,
-    role=ROLE_ARN,
-    sagemaker_session=sm_session,
-    name='lks-loan-risk-model',
-)
-
-predictor = model.deploy(
-    initial_instance_count=1,
-    instance_type='ml.m5.large',
-    endpoint_name=ENDPOINT_NAME,
-    tags=[
+# Create model
+sm.create_model(
+    ModelName=MODEL_NAME,
+    PrimaryContainer={
+        'Image': CONTAINER,
+        'ModelDataUrl': MODEL_DATA,
+    },
+    ExecutionRoleArn=ROLE_ARN,
+    Tags=[
         {'Key': 'Project', 'Value': 'nusantara-fincredit'},
         {'Key': 'Environment', 'Value': 'production'},
         {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
     ],
 )
+print(f"Model created: {MODEL_NAME}")
 
-print(f"Endpoint: {ENDPOINT_NAME} — deploying (~8-10 min)")
+# Create endpoint config
+sm.create_endpoint_config(
+    EndpointConfigName=CONFIG_NAME,
+    ProductionVariants=[{
+        'VariantName': 'AllTraffic',
+        'ModelName': MODEL_NAME,
+        'InitialInstanceCount': 1,
+        'InstanceType': 'ml.m5.large',
+        'InitialVariantWeight': 1,
+    }],
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-fincredit'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+print(f"Config created: {CONFIG_NAME}")
+
+# Create endpoint
+sm.create_endpoint(
+    EndpointName=ENDPOINT_NAME,
+    EndpointConfigName=CONFIG_NAME,
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-fincredit'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+print(f"Endpoint creating: {ENDPOINT_NAME} — polling every 30s (~8-10 min)...")
+
+# Poll until InService
+while True:
+    resp = sm.describe_endpoint(EndpointName=ENDPOINT_NAME)
+    status = resp['EndpointStatus']
+    print(f"  Status: {status}")
+    if status == 'InService':
+        print("\nEndpoint ready.")
+        break
+    elif status in ('Failed', 'OutOfService'):
+        print(f"\nFailed: {resp.get('FailureReason')}")
+        break
+    time.sleep(30)
 ```
 
-Wait ~8–10 minutes for endpoint to reach `InService`.
+Wait ~8–10 minutes for `InService`.
 
 ### 4.2 Test endpoint from CLI (back in your local terminal)
 
@@ -526,8 +563,9 @@ aws sagemaker stop-notebook-instance \
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `AccessDenied: sagemaker:CreateTrainingJob` from CLI | `Pvoclabs2` explicit deny on voclabs session | Run training from inside notebook instance instead |
+| `AccessDenied: sagemaker:CreateTrainingJob` from CLI | `Pvoclabs2` explicit deny on voclabs session | Run training from inside notebook instance (LabRole) |
 | `AccessDenied: sagemaker:CreateNotebookInstance` | Lab doesn't allow notebook creation | Try SageMaker Studio → use Domain with LabRole |
+| `no module named sagemaker.estimator` | SageMaker SDK v3 broke import paths | Use boto3 direct approach in Layer 3 (no SDK needed) |
 | Training job fails immediately | LabRole missing S3 access | Verify buckets exist and names match `lks-sagemaker-*-{ACCOUNT_ID}` |
 | Endpoint stuck `Creating` > 15 min | Instance quota | Try `ml.t2.medium` instead of `ml.m5.large` |
 | Lambda returns `500` | Endpoint not `InService` yet | Wait for endpoint, check CloudWatch logs for Lambda |
