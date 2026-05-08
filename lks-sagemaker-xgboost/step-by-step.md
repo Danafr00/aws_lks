@@ -185,6 +185,7 @@ aws sagemaker-runtime invoke-endpoint \
   --endpoint-name lks-loan-risk-endpoint \
   --content-type text/csv \
   --body "42,85000,12000,36,720,12,0.22,1,3,0" \
+  --cli-binary-format raw-in-base64-out \
   --region ap-southeast-1 /dev/stdout
 echo ""
 
@@ -193,6 +194,7 @@ aws sagemaker-runtime invoke-endpoint \
   --endpoint-name lks-loan-risk-endpoint \
   --content-type text/csv \
   --body "26,32000,20000,60,545,1,0.58,0,8,5" \
+  --cli-binary-format raw-in-base64-out \
   --region ap-southeast-1 /dev/stdout
 echo ""
 ```

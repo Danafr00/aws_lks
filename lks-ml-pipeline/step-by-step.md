@@ -380,6 +380,7 @@ aws sagemaker-runtime invoke-endpoint \
   --endpoint-name lks-paytech-endpoint \
   --content-type text/csv \
   --body "15.32,1,2,0,45,1,7.09,1,18" \
+  --cli-binary-format raw-in-base64-out \
   /tmp/sm-output.txt
 cat /tmp/sm-output.txt
 # Expected: a float close to 1.0 (high fraud probability)

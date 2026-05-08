@@ -2,7 +2,15 @@
 
 **Goal**: Deploy a containerized wallet API on EKS, connected to RDS + EFS + Secrets Manager, with a GitHub Actions CI/CD pipeline.  
 **Approach**: Build one layer at a time — verify it works before moving to the next.  
-**Region**: ap-southeast-1 | **Cost warning**: EKS $0.10/hr, NAT Gateway $0.045/hr — delete after use.
+**Region**: us-east-1 | **Cost warning**: EKS $0.10/hr, NAT Gateway $0.045/hr — delete after use.
+
+> **AWS Academy constraints:**
+> - Cannot create IAM roles → use pre-created Lab roles
+> - EKS cluster role: `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ`
+> - EKS node role: `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ`
+> - All other roles (LBC, EFS CSI, app workloads, GitHub Actions): use `LabRole`
+> - OIDC/IRSA setup may be blocked (`iam:CreateOpenIDConnectProvider` denied) — annotate service accounts with `LabRole` ARN directly
+> - Region: **us-east-1**
 
 > **Note**: kubectl, helm, and docker commands have no console equivalent. Each layer ends with a short terminal block for those. Everything else can be done in the AWS Console.
 
@@ -12,12 +20,12 @@
 
 | Layer | Console | Terminal |
 |---|---|---|
-| **1** | VPC + SGs + Key Pair + IAM + EKS + Node Group + OIDC | Install LBC, deploy Hello App |
+| **1** | VPC + SGs + Key Pair + EKS + Node Group + OIDC | Install LBC (using LabRole), deploy Hello App |
 | **2** | Create ECR repository | Build + push image, update deployment |
 | **3** | RDS subnet group + instance | Connect app to DB |
-| **4** | EFS + mount targets + CSI IAM | Install EFS CSI addon, mount into pods |
-| **5** | Secrets Manager + App IAM role | Install ESO, create ExternalSecret |
-| **6** | GitHub OIDC + IAM role | Push code, watch pipeline |
+| **4** | EFS + mount targets + CSI add-on | Install EFS CSI addon, mount into pods |
+| **5** | Secrets Manager + service account | Install ESO, create ExternalSecret |
+| **6** | GitHub secrets | Push code, watch pipeline |
 
 ---
 
@@ -25,7 +33,7 @@
 
 ### 1.1 VPC
 
-1. Open [VPC Console](https://console.aws.amazon.com/vpc) → region: **ap-southeast-1**
+1. Open [VPC Console](https://console.aws.amazon.com/vpc) → region: **us-east-1**
 2. Left sidebar → **Your VPCs** → **Create VPC**
    - Resources to create: **VPC only**
    - Name tag: `lks-wallet-vpc`
@@ -46,24 +54,24 @@ Create 4 subnets total: 2 public (for ALB), 2 private (for nodes, RDS, EFS).
 **Public Subnet 1 (AZ a)**
 1. **Subnets** → **Create subnet** → VPC: `lks-wallet-vpc`
    - Name: `lks-public-1a`
-   - AZ: `ap-southeast-1a`
+   - AZ: `us-east-1a`
    - CIDR: `10.10.1.0/24`
 2. **Create subnet**
 3. Select it → **Actions** → **Edit subnet settings** → ✅ Enable auto-assign public IPv4 → **Save**
 
 **Public Subnet 2 (AZ b)**
 1. Same steps:
-   - Name: `lks-public-1b` | AZ: `ap-southeast-1b` | CIDR: `10.10.2.0/24`
+   - Name: `lks-public-1b` | AZ: `us-east-1b` | CIDR: `10.10.2.0/24`
 2. Enable auto-assign public IPv4.
 
 **Private Subnet 1 (AZ a)**
 1. Create subnet:
-   - Name: `lks-private-1a` | AZ: `ap-southeast-1a` | CIDR: `10.10.10.0/24`
+   - Name: `lks-private-1a` | AZ: `us-east-1a` | CIDR: `10.10.10.0/24`
 2. Do NOT enable auto-assign public IP.
 
 **Private Subnet 2 (AZ b)**
 1. Create subnet:
-   - Name: `lks-private-1b` | AZ: `ap-southeast-1b` | CIDR: `10.10.11.0/24`
+   - Name: `lks-private-1b` | AZ: `us-east-1b` | CIDR: `10.10.11.0/24`
 2. Do NOT enable auto-assign public IP.
 
 ---
@@ -123,7 +131,7 @@ Nodes in private subnets need internet access to pull container images from ECR.
 
 **Create Elastic IP:**
 1. Left sidebar → **Elastic IPs** → **Allocate Elastic IP address**
-   - Network border group: `ap-southeast-1`
+   - Network border group: `us-east-1`
    - **Allocate**
 
 **Create NAT Gateway:**
@@ -181,23 +189,14 @@ Note the Security Group ID — you will need it when creating the node group.
 
 ### 1.9 IAM Roles
 
-**EKS Cluster Role:**
-1. [IAM Console](https://console.aws.amazon.com/iam) → **Roles** → **Create role**
-   - Trusted entity type: **AWS service**
-   - Use case: scroll to **EKS** → select **EKS – Cluster**
-2. **Next** (policy `AmazonEKSClusterPolicy` is pre-selected) → **Next**
-3. Role name: `LKS-EKSClusterRole` → **Create role**
+> **AWS Academy:** Skip IAM role creation — use pre-created Lab roles below.
 
-**EKS Node Role:**
-1. **Create role** → Trusted entity: **AWS service** → Use case: **EC2** (not EKS)
-2. **Next** → search and check each:
-   - ✅ `AmazonEKSWorkerNodePolicy`
-   - ✅ `AmazonEKS_CNI_Policy`
-   - ✅ `AmazonEC2ContainerRegistryReadOnly`
-   - ✅ `AmazonSSMManagedInstanceCore`
-3. **Next** → Role name: `LKS-EKSNodeRole` → **Create role**
+| Role purpose | Role name to use |
+|---|---|
+| EKS Cluster Role | `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ` |
+| EKS Node Role | `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ` |
 
-**LBC IAM Policy:**
+**LBC IAM Policy** — this policy still needs to be created (policies are allowed, only role creation is blocked):
 
 First download the policy JSON (terminal):
 ```bash
@@ -218,7 +217,7 @@ Then in console:
 **Step 1 — Configure cluster:**
 - Name: `lks-wallet-eks`
 - Kubernetes version: `1.31`
-- Cluster IAM role: `LKS-EKSClusterRole`
+- Cluster IAM role: `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ`
 - **Next**
 
 **Step 2 — Specify networking:**
@@ -240,7 +239,7 @@ Then in console:
 
 Grant your CLI identity cluster-admin access (terminal):
 ```bash
-export AWS_REGION=ap-southeast-1
+export AWS_REGION=us-east-1
 export CLUSTER_NAME=lks-wallet-eks
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 CLI_ARN=$(aws sts get-caller-identity --query Arn --output text)
@@ -274,7 +273,7 @@ kubectl get svc
 
 **Step 1 — Configure node group:**
 - Name: `lks-wallet-ng`
-- Node IAM role: `LKS-EKSNodeRole`
+- Node IAM role: `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ`
 - Leave Launch template toggle **off**
 - **Next**
 
@@ -300,15 +299,17 @@ kubectl get svc
 Verify nodes (terminal):
 ```bash
 kubectl get nodes
-# Expected: 1 node, Status: Ready
+# Expected: 2 nodes, Status: Ready
 ```
 
 ---
 
 ### 1.12 OIDC Provider
 
+> **AWS Academy:** `iam:CreateOpenIDConnectProvider` may be denied. Try the steps below — if they fail, skip to 1.13 and use `LabRole` directly without IRSA.
+
 1. EKS Console → `lks-wallet-eks` → **Overview** tab → copy **OpenID Connect provider URL**
-   - Example: `https://oidc.eks.ap-southeast-1.amazonaws.com/id/ABC123XYZ`
+   - Example: `https://oidc.eks.us-east-1.amazonaws.com/id/ABC123XYZ`
    - Note the **ID** at the end (after `/id/`)
 
 2. IAM Console → **Identity providers** → **Add provider**
@@ -318,31 +319,19 @@ kubectl get nodes
    - Audience: `sts.amazonaws.com`
 3. **Add provider**
 
+If step 2 fails with AccessDenied → skip to 1.13, annotate service accounts with `LabRole` ARN directly.
+
 ---
 
 ### 1.13 LBC IAM Role (IRSA)
 
-1. IAM Console → **Roles** → **Create role**
-   - Trusted entity: **Web identity**
-   - Identity provider: select the OIDC provider you just added
-   - Audience: `sts.amazonaws.com`
-2. **Next** → search `AWSLoadBalancerControllerIAMPolicy` → ✅ check it → **Next**
-3. Role name: `LKS-LBCRole` → **Create role**
+> **AWS Academy:** Skip role creation — use `LabRole` directly. The LBC service account will be annotated with `LabRole` ARN.
 
-**Restrict the trust policy to the LBC service account:**
-1. IAM → **Roles** → `LKS-LBCRole` → **Trust relationships** → **Edit trust policy**
-2. Replace the entire `"Condition"` block with (substitute your real OIDC_ID):
-
-```json
-"Condition": {
-  "StringEquals": {
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:aud": "sts.amazonaws.com"
-  }
-}
+```bash
+# AWS Academy: skip IAM role creation — LabRole used directly
+export LBC_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
+echo "LBC Role: $LBC_ROLE_ARN"
 ```
-
-3. **Update policy**
 
 ---
 
@@ -350,14 +339,12 @@ kubectl get nodes
 
 ```bash
 # Set variables (run these if you opened a new terminal)
-export AWS_REGION=ap-southeast-1
+export AWS_REGION=us-east-1
 export CLUSTER_NAME=lks-wallet-eks
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export VPC_ID=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION \
   --query "cluster.resourcesVpcConfig.vpcId" --output text)
-export OIDC_ID=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION \
-  --query "cluster.identity.oidc.issuer" --output text | awk -F'/' '{print $NF}')
-export LBC_ROLE_ARN=$(aws iam get-role --role-name LKS-LBCRole --query 'Role.Arn' --output text)
+export LBC_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
 # Install LBC
 kubectl create serviceaccount aws-load-balancer-controller -n kube-system
@@ -540,7 +527,7 @@ kubectl get pods -n wallet
    - Name: `lks-wallet-db-subnet`
    - Description: `Wallet DB subnets`
    - VPC: `lks-wallet-vpc`
-   - AZs: `ap-southeast-1a`, `ap-southeast-1b`
+   - AZs: `us-east-1a`, `us-east-1b`
    - Subnets: select `lks-private-1a` and `lks-private-1b`
 2. **Create**
 
@@ -575,7 +562,7 @@ kubectl get pods -n wallet
 - DB subnet group: `lks-wallet-db-subnet`
 - Public access: **No**
 - VPC security group: **Choose existing** → remove default → add `lks-rds-sg`
-- AZ: `ap-southeast-1a`
+- AZ: `us-east-1a`
 
 **Additional configuration:**
 - Initial database name: `wallet_db`
@@ -665,7 +652,7 @@ Multiple pods need to share uploaded files. EFS supports `ReadWriteMany` — EBS
 - **Next**
 
 **Step 2 — Network access:**
-- For each AZ (`ap-southeast-1a`, `ap-southeast-1b`):
+- For each AZ (`us-east-1a`, `us-east-1b`):
   - Subnet: select the private subnet (`lks-private-1a` / `lks-private-1b`)
   - Security group: remove the default → add `lks-efs-sg`
 - **Next**
@@ -680,9 +667,11 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 
 ---
 
-### 4.3 EFS CSI Driver IAM (Console)
+### 4.3 EFS CSI Driver IAM
 
-**Create EFS CSI Policy:**
+> **AWS Academy:** Skip role creation — use `LabRole` for the EFS CSI driver service account.
+
+**Create EFS CSI Policy** (policies are allowed):
 1. IAM Console → **Policies** → **Create policy** → **JSON** tab → paste:
 
 ```json
@@ -710,28 +699,7 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 
 2. **Next** → Policy name: `LKS-EFSCSIPolicy` → **Create policy**
 
-**Create EFS CSI Role:**
-1. IAM → **Roles** → **Create role**
-   - Trusted entity: **Web identity**
-   - Identity provider: your OIDC provider
-   - Audience: `sts.amazonaws.com`
-2. **Next** → search and select `LKS-EFSCSIPolicy` → **Next**
-3. Role name: `LKS-EFSCSIDriverRole` → **Create role**
-
-**Restrict trust policy to EFS CSI service account:**
-1. IAM → **Roles** → `LKS-EFSCSIDriverRole` → **Trust relationships** → **Edit trust policy**
-2. Replace the `"Condition"` block (substitute your real OIDC_ID):
-
-```json
-"Condition": {
-  "StringEquals": {
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa",
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:aud": "sts.amazonaws.com"
-  }
-}
-```
-
-3. **Update policy**
+> **AWS Academy:** Skip EFS CSI Role creation — annotate the service account with `LabRole` ARN in step 4.4.
 
 ---
 
@@ -740,7 +708,7 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 1. EKS Console → `lks-wallet-eks` → **Add-ons** tab → **Get more add-ons**
 2. Search for `Amazon EFS CSI Driver` → select it → **Next**
 3. Version: keep default (latest)
-4. IAM role for service account: select `LKS-EFSCSIDriverRole`
+4. IAM role for service account: select **Enter IAM role ARN** → paste `arn:aws:iam::237675846062:role/LabRole`
 5. **Next** → **Create**
 
 > ⏳ Wait ~1 minute for Status: **Active**
@@ -804,48 +772,14 @@ Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager
 
 ---
 
-### 5.2 App IAM Policy + Role (Console)
+### 5.2 App Service Account (Console + Terminal)
 
-**Create App Policy:**
-1. IAM → **Policies** → **Create policy** → **JSON** tab → paste (replace `ACCOUNT_ID` and `AWS_REGION`):
+> **AWS Academy:** Skip App Role and App Policy creation — use `LabRole` directly for the wallet service account.
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
-     "Resource": "arn:aws:secretsmanager:ap-southeast-1:ACCOUNT_ID:secret:lks/wallet/*"},
-    {"Effect": "Allow",
-     "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
-     "Resource": "*"}
-  ]
-}
+```bash
+export WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
+echo "Wallet Role: $WALLET_ROLE_ARN"
 ```
-
-2. Policy name: `LKS-WalletAppPolicy` → **Create policy**
-
-**Create App Role:**
-1. IAM → **Roles** → **Create role**
-   - Trusted entity: **Web identity**
-   - Identity provider: your OIDC provider
-   - Audience: `sts.amazonaws.com`
-2. **Next** → select `LKS-WalletAppPolicy` → **Next**
-3. Role name: `LKS-WalletAppRole` → **Create role**
-
-**Restrict trust policy to wallet service account:**
-1. IAM → **Roles** → `LKS-WalletAppRole` → **Trust relationships** → **Edit trust policy**
-2. Replace the `"Condition"` block (substitute your real OIDC_ID):
-
-```json
-"Condition": {
-  "StringEquals": {
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:sub": "system:serviceaccount:wallet:wallet-api-sa",
-    "oidc.eks.ap-southeast-1.amazonaws.com/id/OIDC_ID:aud": "sts.amazonaws.com"
-  }
-}
-```
-
-3. **Update policy**
 
 ---
 
@@ -857,8 +791,7 @@ Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager
 > ```
 
 ```bash
-export WALLET_ROLE_ARN=$(aws iam get-role --role-name LKS-WalletAppRole \
-  --query 'Role.Arn' --output text)
+export WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
 # Create and annotate service account
 kubectl create serviceaccount wallet-api-sa -n wallet
@@ -936,75 +869,12 @@ kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | c
 
 ## Layer 6 — GitHub Actions CI/CD
 
-### 6.1 Register GitHub OIDC Provider (Console)
+> **AWS Academy:** GitHub OIDC role creation is blocked (`iam:CreateOpenIDConnectProvider` and `iam:CreateRole` denied). Use long-lived credentials stored as GitHub secrets instead.
 
-1. IAM Console → **Identity providers** → **Add provider**
-   - Provider type: **OpenID Connect**
-   - Provider URL: `https://token.actions.githubusercontent.com`
-   - **Get thumbprint** (auto-fills)
-   - Audience: `sts.amazonaws.com`
-2. **Add provider**
-
----
-
-### 6.2 IAM Role for GitHub Actions (Console)
-
-**Create Role:**
-1. IAM → **Roles** → **Create role**
-   - Trusted entity: **Web identity**
-   - Identity provider: `token.actions.githubusercontent.com`
-   - Audience: `sts.amazonaws.com`
-2. **Next** → skip policies for now (you'll add them inline) → **Next**
-3. Role name: `LKS-GitHubActionsRole` → **Create role**
-
-**Add inline policy:**
-1. Click `LKS-GitHubActionsRole` → **Add permissions** → **Create inline policy** → **JSON** tab:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": [
-      "ecr:GetAuthorizationToken",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:InitiateLayerUpload",
-      "ecr:UploadLayerPart",
-      "ecr:CompleteLayerUpload",
-      "ecr:PutImage"
-    ], "Resource": "*"},
-    {"Effect": "Allow", "Action": "eks:DescribeCluster",
-     "Resource": "arn:aws:eks:ap-southeast-1:ACCOUNT_ID:cluster/lks-wallet-eks"}
-  ]
-}
-```
-
-   Replace `ACCOUNT_ID` with your actual account ID.
-2. Policy name: `GitHubActionsPolicy` → **Create policy**
-
-**Restrict trust policy to your repository:**
-1. `LKS-GitHubActionsRole` → **Trust relationships** → **Edit trust policy**
-2. Replace the `"Condition"` block (replace `YOUR_ORG/YOUR_REPO`):
-
-```json
-"Condition": {
-  "StringEquals": {
-    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-  },
-  "StringLike": {
-    "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:ref:refs/heads/main"
-  }
-}
-```
-
-3. **Update policy**
-
----
-
-### 6.3 Grant GitHub Actions Access to EKS (Terminal)
+### 6.1 Grant LabRole Access to EKS (Terminal)
 
 ```bash
-GITHUB_ROLE_ARN=$(aws iam get-role --role-name LKS-GitHubActionsRole \
-  --query 'Role.Arn' --output text)
+GITHUB_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
 aws eks create-access-entry \
   --cluster-name $CLUSTER_NAME \
@@ -1021,20 +891,24 @@ aws eks associate-access-policy \
 
 ---
 
-### 6.4 GitHub Repository Secrets (GitHub UI)
+### 6.2 GitHub Repository Secrets (GitHub UI)
 
 In your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
 | Secret name | Value |
 |---|---|
 | `AWS_ACCOUNT_ID` | Your 12-digit account ID |
-| `AWS_REGION` | `ap-southeast-1` |
+| `AWS_REGION` | `us-east-1` |
 | `EKS_CLUSTER_NAME` | `lks-wallet-eks` |
-| `AWS_ROLE_ARN` | ARN of `LKS-GitHubActionsRole` (copy from IAM console) |
+| `AWS_ACCESS_KEY_ID` | Your voclabs access key (from AWS Details panel) |
+| `AWS_SECRET_ACCESS_KEY` | Your voclabs secret key |
+| `AWS_SESSION_TOKEN` | Your voclabs session token |
+
+> **Note:** Session tokens expire with the lab session. Update these secrets each time you start a new lab session.
 
 ---
 
-### 6.5 Trigger and Verify (Terminal)
+### 6.3 Trigger and Verify (Terminal)
 
 ```bash
 # Make a small change and push
@@ -1096,24 +970,13 @@ kubectl describe pods -n wallet | grep "Image:"
    - Waiting period: 0 days → **Schedule deletion**
 2. Repeat for `lks/wallet/db`
 
-### Console: IAM → delete roles and policies
+### Console: IAM → delete custom policies only
 
-Delete roles in this order (detach policies first if needed):
-1. `LKS-GitHubActionsRole`
-2. `LKS-WalletAppRole`
-3. `LKS-EFSCSIDriverRole`
-4. `LKS-LBCRole`
-5. `LKS-EKSNodeRole`
-6. `LKS-EKSClusterRole`
+> **AWS Academy:** Do NOT delete Lab roles. Delete only the custom policies you created:
 
-Delete custom policies:
-- `LKS-WalletAppPolicy`
+- `LKS-WalletAppPolicy` (if created)
 - `LKS-EFSCSIPolicy`
 - `AWSLoadBalancerControllerIAMPolicy`
-
-Delete identity providers:
-- `oidc.eks.ap-southeast-1.amazonaws.com/id/...` (EKS OIDC)
-- `token.actions.githubusercontent.com` (GitHub OIDC)
 
 ### Console: NAT Gateway + Elastic IP
 
@@ -1155,6 +1018,7 @@ wallet-api pods  (private subnets, m7i-flex.large, AL2023)
 
 GitHub Actions (on push to main):
   test → build+push to ECR → kubectl set image → rollout
+  (uses static credentials — update secrets each lab session)
 ```
 
 ---
@@ -1163,12 +1027,15 @@ GitHub Actions (on push to main):
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `AccessDenied: iam:CreateRole` | AWS Academy voclabs policy blocks role creation | Use pre-created Lab roles — see section 1.9 |
+| `AccessDenied: iam:CreateOpenIDConnectProvider` | AWS Academy blocks OIDC provider creation | Skip OIDC — annotate service accounts with LabRole ARN directly |
 | Node group stuck `CREATING` | Launch template or wrong AMI | Delete, re-create with AL2023 and no launch template |
-| LBC pods not ready after 5 min | IAM trust policy wrong OIDC ID or SA name | Re-check trust policy condition in IAM |
+| LBC pods not ready after 5 min | LabRole trust policy doesn't include `eks.amazonaws.com` | Check LabRole trust policy — it should allow `ec2.amazonaws.com` at minimum |
 | Ingress has no ADDRESS | Subnet tags missing or wrong cluster name | Verify all 4 subnets have `kubernetes.io/cluster/lks-wallet-eks` tag |
-| `ExternalSecret` not syncing | App role can't read Secrets Manager | Check role policy has the correct secret ARN pattern |
+| `ExternalSecret` not syncing | LabRole can't read Secrets Manager | Check LabRole has `secretsmanager:GetSecretValue` permission |
 | EFS PVC stuck `Pending` | EFS CSI driver not running | Check `kubectl get pods -n kube-system \| grep efs` |
-| GitHub Actions `Unauthorized` to EKS | Access entry missing | Run `aws eks create-access-entry` + `associate-access-policy` |
+| GitHub Actions `Unauthorized` to EKS | Access entry missing for LabRole | Run `aws eks create-access-entry` + `associate-access-policy` for LabRole ARN |
+| GitHub Actions credentials expired | Session token expired with lab session | Update `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` secrets |
 | `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
 | ALB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
 | Pod connection timeout to RDS despite SG rule | Rule allows `lks-eks-node-sg` but pods use the auto-created EKS cluster SG | Add inbound rule for `eks-cluster-sg-lks-wallet-eks-*` SG on port 5432 |

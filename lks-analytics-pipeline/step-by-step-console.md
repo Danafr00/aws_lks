@@ -1,7 +1,11 @@
 # Kunci Jawaban – Serverless Data Analytics Pipeline (Console Guide)
 
+> **AWS Academy constraints:**
+> - Cannot create IAM roles → use `LabRole` for everything
+> - Region: **us-east-1**
+
 > **Panduan ini 100% via AWS Management Console.** Tidak ada perintah CLI yang diperlukan.
-> Buka semua layanan di region **ap-southeast-1 (Singapore)**.
+> Buka semua layanan di region **us-east-1 (N. Virginia)**.
 
 ---
 
@@ -10,7 +14,7 @@
 | Layer | Yang Dibangun | Checkpoint |
 |---|---|---|
 | **1** | S3 Buckets + EventBridge notification | Upload file → event muncul di EventBridge |
-| **2** | IAM Roles | Role tampil di IAM console |
+| **2** | ~~IAM Roles~~ *(skip — gunakan LabRole)* | `LabRole` sudah tersedia |
 | **3** | Glue Database + ETL Job + Crawler | Job dapat dijalankan manual |
 | **4** | Lake Formation permissions | Glue ETL bisa tulis ke processed bucket |
 | **5** | Lambda + EventBridge Rule | Upload file → Lambda log tampil |
@@ -34,7 +38,7 @@ Ulangi langkah ini **tiga kali** untuk membuat ketiga bucket berikut (ganti `{AC
 **Langkah membuat setiap bucket:**
 1. Buka **S3** → klik **Create bucket**
 2. **Bucket name:** isi sesuai nama di atas
-3. **AWS Region:** `ap-southeast-1`
+3. **AWS Region:** `us-east-1`
 4. **Block Public Access:** biarkan semua dicentang (default)
 5. **Bucket Versioning:**
    - Raw bucket → **Enable**
@@ -73,227 +77,19 @@ Pastikan file ada di path: `s3://lks-analytics-processed-{ACCOUNT_ID}/scripts/et
 
 ---
 
-## Task 2 – Create IAM Roles
+## Task 2 – IAM Roles
 
-### Step 1: Buat LKS-GlueETLRole
-
-1. Buka **IAM** → **Roles** → klik **Create role**
-2. **Trusted entity type:** AWS service
-3. **Use case:** pilih **Glue** → klik **Next**
-4. Di halaman Add permissions:
-   - Cari `AWSGlueServiceRole` → centang
-   - Klik **Next**
-5. **Role name:** `LKS-GlueETLRole`
-6. **Tags:**
-   - `Project` = `nusantara-analytics`
-   - `Environment` = `production`
-   - `ManagedBy` = `LKS-Team`
-7. Klik **Create role**
-
-**Tambahkan inline policy:**
-1. IAM → Roles → klik `LKS-GlueETLRole`
-2. Tab **Permissions** → **Add permissions** → **Create inline policy**
-3. Klik tab **JSON** → hapus isi yang ada → paste JSON berikut:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "S3DataLakeReadWrite",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::lks-analytics-raw-*",
-        "arn:aws:s3:::lks-analytics-raw-*/*",
-        "arn:aws:s3:::lks-analytics-processed-*",
-        "arn:aws:s3:::lks-analytics-processed-*/*"
-      ]
-    },
-    {
-      "Sid": "GlueCatalogAccess",
-      "Effect": "Allow",
-      "Action": [
-        "glue:GetDatabase",
-        "glue:CreateDatabase",
-        "glue:GetTable",
-        "glue:CreateTable",
-        "glue:UpdateTable",
-        "glue:GetPartitions",
-        "glue:BatchCreatePartition",
-        "glue:GetCrawler",
-        "glue:StartCrawler"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "LakeFormationDataAccess",
-      "Effect": "Allow",
-      "Action": [
-        "lakeformation:GetDataAccess",
-        "lakeformation:GrantPermissions"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "CloudWatchLogs",
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:*:*:/aws-glue/*"
-    },
-    {
-      "Sid": "CloudWatchMetrics",
-      "Effect": "Allow",
-      "Action": [
-        "cloudwatch:PutMetricData"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-4. Klik **Next** → **Policy name:** `LKS-GlueETLPolicy` → klik **Create policy**
-
-### Step 2: Buat LKS-LambdaGlueTriggerRole
-
-1. IAM → **Roles** → **Create role**
-2. **Trusted entity type:** AWS service
-3. **Use case:** pilih **Lambda** → klik **Next**
-4. Cari dan centang `AWSLambdaBasicExecutionRole` → **Next**
-5. **Role name:** `LKS-LambdaGlueTriggerRole`
-6. Klik **Create role**
-
-**Tambahkan inline policy:**
-1. IAM → Roles → klik `LKS-LambdaGlueTriggerRole`
-2. **Add permissions** → **Create inline policy** → tab **JSON** → paste:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "GlueTrigger",
-      "Effect": "Allow",
-      "Action": [
-        "glue:StartJobRun",
-        "glue:GetJobRun",
-        "glue:GetJobRuns"
-      ],
-      "Resource": "arn:aws:glue:ap-southeast-1:*:job/lks-etl-sales"
-    },
-    {
-      "Sid": "CloudWatchLogs",
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:*:*:*"
-    }
-  ]
-}
-```
-
-3. **Policy name:** `LKS-LambdaGlueTriggerPolicy` → **Create policy**
-
-### Step 3: Buat LKS-AthenaAnalystRole
-
-1. IAM → **Roles** → **Create role**
-2. **Trusted entity type:** AWS account
-3. **An AWS account:** pilih **This account** → klik **Next**
-4. Skip halaman Add permissions (jangan attach dulu) → **Next**
-5. **Role name:** `LKS-AthenaAnalystRole` → **Create role**
-
-**Tambahkan inline policy:**
-1. IAM → Roles → klik `LKS-AthenaAnalystRole`
-2. **Add permissions** → **Create inline policy** → tab **JSON** → paste:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AthenaWorkgroupAccess",
-      "Effect": "Allow",
-      "Action": [
-        "athena:StartQueryExecution",
-        "athena:GetQueryExecution",
-        "athena:GetQueryResults",
-        "athena:StopQueryExecution",
-        "athena:GetWorkGroup",
-        "athena:ListWorkGroups",
-        "athena:ListDatabases",
-        "athena:ListTableMetadata",
-        "athena:GetTableMetadata"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "S3ResultsBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::lks-analytics-results-*",
-        "arn:aws:s3:::lks-analytics-results-*/*"
-      ]
-    },
-    {
-      "Sid": "S3ProcessedDataRead",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::lks-analytics-processed-*",
-        "arn:aws:s3:::lks-analytics-processed-*/*"
-      ]
-    },
-    {
-      "Sid": "GlueCatalogRead",
-      "Effect": "Allow",
-      "Action": [
-        "glue:GetDatabase",
-        "glue:GetDatabases",
-        "glue:GetTable",
-        "glue:GetTables",
-        "glue:GetPartitions"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "LakeFormationDataAccess",
-      "Effect": "Allow",
-      "Action": [
-        "lakeformation:GetDataAccess"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-3. **Policy name:** `LKS-AthenaAnalystPolicy` → **Create policy**
+> **AWS Academy:** Skip seluruh task ini. `LabRole` sudah tersedia dengan permissions yang diperlukan untuk Glue, Lambda, dan Athena.
+>
+> Gunakan ARN berikut di semua langkah selanjutnya:
+> ```
+> arn:aws:iam::{ACCOUNT_ID}:role/LabRole
+> ```
+>
+> Cara menemukan ARN lengkap: **IAM** → **Roles** → cari `LabRole` → salin ARN dari halaman detail.
 
 **Layer 2 checkpoint:**
-- [ ] `LKS-GlueETLRole` ada di IAM → memiliki `AWSGlueServiceRole` + `LKS-GlueETLPolicy`
-- [ ] `LKS-LambdaGlueTriggerRole` ada di IAM → memiliki `AWSLambdaBasicExecutionRole` + `LKS-LambdaGlueTriggerPolicy`
-- [ ] `LKS-AthenaAnalystRole` ada di IAM → memiliki `LKS-AthenaAnalystPolicy`
+- [ ] IAM → Roles → `LabRole` ada di daftar
 
 ---
 
@@ -317,7 +113,7 @@ Pastikan file ada di path: `s3://lks-analytics-processed-{ACCOUNT_ID}/scripts/et
 6. Di halaman editor, klik **Job details** (tab di atas)
 7. Isi konfigurasi:
    - **Name:** `lks-etl-sales`
-   - **IAM Role:** `LKS-GlueETLRole`
+   - **IAM Role:** `LabRole`
    - **Glue version:** `Glue 4.0`
    - **Language:** Python 3
    - **Worker type:** `G.025X`
@@ -345,7 +141,7 @@ Pastikan file ada di path: `s3://lks-analytics-processed-{ACCOUNT_ID}/scripts/et
    - **Subsequent crawler runs:** Crawl all sub-folders
    - Klik **Add an S3 data source**
 5. Klik **Next**
-6. **IAM role:** pilih **Choose an existing IAM role** → `LKS-GlueETLRole` → **Next**
+6. **IAM role:** pilih **Choose an existing IAM role** → `LabRole` → **Next**
 7. **Target database:** `lks_analytics_db`
 8. **Table name prefix:** (kosongkan)
 9. **Crawler schedule:** Hourly → **Next**
@@ -353,7 +149,7 @@ Pastikan file ada di path: `s3://lks-analytics-processed-{ACCOUNT_ID}/scripts/et
 
 **Layer 3 checkpoint:**
 - [ ] `lks_analytics_db` muncul di Glue → Databases
-- [ ] `lks-etl-sales` muncul di Glue → ETL jobs
+- [ ] `lks-etl-sales` muncul di Glue → ETL jobs, IAM role = `LabRole`
 - [ ] `lks-crawler-sales` muncul di Glue → Crawlers, status **Ready**
 
 ---
@@ -385,13 +181,13 @@ Pastikan file ada di path: `s3://lks-analytics-processed-{ACCOUNT_ID}/scripts/et
    - Jika tidak ada, pilih **Create a new role**
 4. Klik **Register location**
 
-### Step 4: Grant permissions ke LKS-GlueETLRole
+### Step 4: Grant permissions ke LabRole (untuk Glue ETL)
 
 Lakukan **tiga kali** Grant (untuk data location, database, dan table):
 
 **Grant 1 — Data location access:**
 1. Lake Formation → **Permissions** → **Data lake permissions** → klik **Grant**
-2. **IAM users and roles:** pilih `LKS-GlueETLRole`
+2. **IAM users and roles:** pilih `LabRole`
 3. **LF-Tags or catalog resources:** pilih **Named Data Catalog resources**
 4. **Storage locations:** pilih `s3://lks-analytics-processed-{ACCOUNT_ID}`
 5. **Storage location permissions:** centang **Data location**
@@ -399,7 +195,7 @@ Lakukan **tiga kali** Grant (untuk data location, database, dan table):
 
 **Grant 2 — Database permissions:**
 1. Lake Formation → **Permissions** → **Data lake permissions** → klik **Grant**
-2. **IAM users and roles:** pilih `LKS-GlueETLRole`
+2. **IAM users and roles:** pilih `LabRole`
 3. **Named Data Catalog resources:**
    - **Databases:** pilih `lks_analytics_db`
 4. **Database permissions:** centang `Create table` dan `Describe`
@@ -407,36 +203,18 @@ Lakukan **tiga kali** Grant (untuk data location, database, dan table):
 
 **Grant 3 — Table permissions:**
 1. Lake Formation → **Permissions** → **Data lake permissions** → klik **Grant**
-2. **IAM users and roles:** pilih `LKS-GlueETLRole`
+2. **IAM users and roles:** pilih `LabRole`
 3. **Named Data Catalog resources:**
    - **Databases:** `lks_analytics_db`
    - **Tables:** pilih **All tables**
 4. **Table permissions:** centang `Select`, `Insert`, `Delete`, `Describe`, `Alter`
 5. Klik **Grant**
 
-### Step 5: Grant permissions ke LKS-AthenaAnalystRole
-
-**Grant 1 — Database describe:**
-1. Lake Formation → **Permissions** → **Data lake permissions** → klik **Grant**
-2. **IAM users and roles:** pilih `LKS-AthenaAnalystRole`
-3. **Named Data Catalog resources:**
-   - **Databases:** `lks_analytics_db`
-4. **Database permissions:** centang `Describe`
-5. Klik **Grant**
-
-**Grant 2 — Table SELECT:**
-1. Lake Formation → **Permissions** → **Data lake permissions** → klik **Grant**
-2. **IAM users and roles:** pilih `LKS-AthenaAnalystRole`
-3. **Named Data Catalog resources:**
-   - **Databases:** `lks_analytics_db`
-   - **Tables:** pilih **All tables**
-4. **Table permissions:** centang `Select`, `Describe`
-5. Klik **Grant**
+> **Catatan:** Karena LabRole digunakan untuk semua service (Glue ETL, Lambda, Athena), satu set grant sudah mencakup semua akses yang diperlukan.
 
 **Layer 4 checkpoint:**
 - [ ] Data lake locations → `lks-analytics-processed-{ACCOUNT_ID}` ada dan status **Registered**
-- [ ] Data lake permissions → `LKS-GlueETLRole` punya `DATA_LOCATION_ACCESS`, `CREATE_TABLE`, `SELECT`
-- [ ] Data lake permissions → `LKS-AthenaAnalystRole` punya `SELECT` pada `lks_analytics_db`
+- [ ] Data lake permissions → `LabRole` punya `DATA_LOCATION_ACCESS`, `CREATE_TABLE`, `SELECT`
 
 ---
 
@@ -451,7 +229,7 @@ Sebelum membuat fungsi, siapkan zip file. Karena kita tidak pakai CLI, upload la
 3. **Function name:** `lks-glue-trigger`
 4. **Runtime:** Python 3.12
 5. **Architecture:** x86_64
-6. **Execution role:** pilih **Use an existing role** → `LKS-LambdaGlueTriggerRole`
+6. **Execution role:** pilih **Use an existing role** → `LabRole`
 7. Klik **Create function**
 
 **Upload kode:**
@@ -570,7 +348,7 @@ def handler(event, context):
 12. Klik **Next** → **Next** → **Create rule**
 
 **Layer 5 checkpoint:**
-- [ ] Lambda `lks-glue-trigger` ada, status **Active**
+- [ ] Lambda `lks-glue-trigger` ada, status **Active**, execution role = `LabRole`
 - [ ] Handler = `lambda_function.handler`
 - [ ] 3 environment variables tersimpan
 - [ ] EventBridge rule `lks-s3-sales-upload` ada, status **Enabled**
@@ -858,17 +636,14 @@ ORDER BY tx_count DESC;
 | S3 raw bucket | `lks-analytics-raw-{account}` | ✓ |
 | S3 processed bucket | `lks-analytics-processed-{account}` | ✓ |
 | S3 results bucket | `lks-analytics-results-{account}` | ✓ |
-| IAM role — Glue | `LKS-GlueETLRole` | ✓ |
-| IAM role — Lambda | `LKS-LambdaGlueTriggerRole` | ✓ |
-| IAM role — Analyst | `LKS-AthenaAnalystRole` | ✓ |
+| IAM role | `LabRole` (pre-existing, skip creation) | ✓ |
 | Glue Data Catalog database | `lks_analytics_db` | ✓ |
 | Glue ETL job | `lks-etl-sales` (G.025X) | ⚠️ ~$0.004/run |
 | Glue Crawler | `lks-crawler-sales` (hourly) | ⚠️ ~$0.01/run |
 | Lake Formation — LF admin | current IAM user | ✓ |
 | Lake Formation — S3 registered | `lks-analytics-processed-{account}` | ✓ |
-| Lake Formation — Glue permissions | CREATE_TABLE, DATA_LOCATION_ACCESS, SELECT | ✓ |
-| Lake Formation — Analyst permissions | SELECT, DESCRIBE pada `lks_analytics_db` | ✓ |
-| Lambda function | `lks-glue-trigger` (Python 3.12) | ✓ |
+| Lake Formation — LabRole permissions | CREATE_TABLE, DATA_LOCATION_ACCESS, SELECT | ✓ |
+| Lambda function | `lks-glue-trigger` (Python 3.12, LabRole) | ✓ |
 | EventBridge rule | `lks-s3-sales-upload` | ✓ |
 | Athena workgroup | `lks-analytics-wg` | ⚠️ $5/TB scanned |
 | SNS topic | `lks-analytics-alerts` | ✓ |

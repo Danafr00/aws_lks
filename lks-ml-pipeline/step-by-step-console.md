@@ -1,7 +1,12 @@
 # Step-by-Step: ML Pipeline + ECS Inference — AWS Console Guide
 
 **Goal**: Fraud detection system for PT. Nusantara PayTech — data pipeline trains XGBoost model, ECS Fargate serves inference 24/7.  
-**Region**: ap-southeast-1 | **Cost warning**: SageMaker endpoint $0.096/hr, Fargate ~$0.02/hr — delete after use.
+**Region**: us-east-1 | **Cost warning**: SageMaker endpoint $0.096/hr, Fargate ~$0.02/hr — delete after use.
+
+> **AWS Academy constraints:**
+> - Cannot create IAM roles → use `LabRole` for everything
+> - `voclabs` session denies `sagemaker:CreateTrainingJob` directly → train inside a Notebook Instance
+> - Region: **us-east-1**
 
 > **Terminal required for**: Docker build/push, zip/deploy Lambda, Glue job polling, and kubectl-equivalent CLI steps. Everything else is in the AWS Console.
 
@@ -11,9 +16,9 @@
 
 | Layer | Console | Terminal |
 |---|---|---|
-| **1** | S3 buckets, SQS queue, SQS policy, S3 event notification, Lambda IAM | Package + deploy Lambda |
+| **1** | S3 buckets, SQS queue, SQS policy, S3 event notification | Package + deploy Lambda |
 | **2** | Glue job, Crawler, Athena workgroup | Run ETL job, query Athena |
-| **3** | SageMaker training + endpoint | Upload data, start training job (or via console) |
+| **3** | SageMaker Notebook Instance → training + endpoint | Upload data, run boto3 training cell |
 | **4** | ECR repo, ECS cluster, task def, ALB, security groups, ECS service | Docker build/push |
 | **5** | DynamoDB table, API Gateway, Amplify | Deploy frontend |
 
@@ -33,7 +38,7 @@
    | `lks-paytech-results-{ACCOUNT_ID}` | Prediction JSON results |
 
    For each bucket:
-   - Region: **ap-southeast-1**
+   - Region: **us-east-1**
    - Block all public access: ✅ (keep default)
    - Leave everything else default → **Create bucket**
 
@@ -48,7 +53,7 @@
    - Message retention period: `86400` seconds (1 day)
 2. **Create queue**
 3. Click the queue → **Access policy** tab → **Edit**
-4. Replace the policy JSON with (replace `ACCOUNT_ID` and `AWS_REGION`):
+4. Replace the policy JSON with (replace `ACCOUNT_ID`):
 
 ```json
 {
@@ -57,7 +62,7 @@
     "Effect": "Allow",
     "Principal": { "Service": "s3.amazonaws.com" },
     "Action": "sqs:SendMessage",
-    "Resource": "arn:aws:sqs:ap-southeast-1:ACCOUNT_ID:lks-paytech-queue",
+    "Resource": "arn:aws:sqs:us-east-1:ACCOUNT_ID:lks-paytech-queue",
     "Condition": {
       "ArnLike": {
         "aws:SourceArn": "arn:aws:s3:::lks-paytech-raw-ACCOUNT_ID"
@@ -86,56 +91,22 @@ Note the **Queue ARN** (visible in queue details).
 
 ---
 
-### 1.4 IAM Role for Lambda (Console)
+### 1.4 IAM Role for Lambda
 
-1. [IAM Console](https://console.aws.amazon.com/iam) → **Roles** → **Create role**
-   - Trusted entity: **AWS service** → **Lambda**
-2. **Next** — add these managed policies:
-   - ✅ `AWSLambdaBasicExecutionRole`
-   - ✅ `AmazonSQSFullAccess` (or use the scoped inline policy below)
-3. **Next** → Role name: `LKS-FeatureLambdaRole` → **Create role**
-
-4. Click `LKS-FeatureLambdaRole` → **Add permissions** → **Create inline policy** → **JSON**:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::lks-paytech-raw-ACCOUNT_ID",
-        "arn:aws:s3:::lks-paytech-raw-ACCOUNT_ID/*"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::lks-paytech-features-ACCOUNT_ID/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
-      "Resource": "arn:aws:sqs:ap-southeast-1:ACCOUNT_ID:lks-paytech-queue"
-    }
-  ]
-}
-```
-
-Replace both `ACCOUNT_ID`. Policy name: `LKS-FeatureLambdaInlinePolicy` → **Create policy**
+> **AWS Academy:** Skip this step. `LabRole` already exists with required permissions.
+> Use ARN: `arn:aws:iam::{ACCOUNT_ID}:role/LabRole`
 
 ---
 
 ### 1.5 Deploy Lambda (Terminal)
 
 ```bash
-export AWS_REGION=ap-southeast-1
+export AWS_REGION=us-east-1
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"
 
-LAMBDA_ROLE_ARN=$(aws iam get-role \
-  --role-name LKS-FeatureLambdaRole --query 'Role.Arn' --output text)
+# AWS Academy: skip IAM role creation — use LabRole instead
+# arn:aws:iam::${ACCOUNT_ID}:role/LabRole
 
 cd app/feature_lambda/
 zip /tmp/lks-feature-trigger.zip handler.py
@@ -145,7 +116,7 @@ aws lambda create-function \
   --function-name lks-feature-trigger \
   --runtime python3.12 \
   --handler handler.handler \
-  --role "$LAMBDA_ROLE_ARN" \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/LabRole" \
   --zip-file fileb:///tmp/lks-feature-trigger.zip \
   --timeout 300 \
   --memory-size 256 \
@@ -185,32 +156,10 @@ aws s3 ls "s3://${FEATURES_BUCKET}/features/"
 
 ## Layer 2 — Glue ETL + Athena
 
-### 2.1 Glue IAM Role (Console)
+### 2.1 IAM Role for Glue
 
-1. IAM → **Roles** → **Create role**
-   - Trusted entity: **AWS service** → **Glue**
-2. Add managed policies:
-   - ✅ `AWSGlueServiceRole`
-3. Role name: `LKS-GlueETLRole` → **Create role**
-4. Click role → **Add inline policy** → **JSON**:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"],
-    "Resource": [
-      "arn:aws:s3:::lks-paytech-features-ACCOUNT_ID",
-      "arn:aws:s3:::lks-paytech-features-ACCOUNT_ID/*",
-      "arn:aws:s3:::lks-paytech-processed-ACCOUNT_ID",
-      "arn:aws:s3:::lks-paytech-processed-ACCOUNT_ID/*"
-    ]
-  }]
-}
-```
-
-Policy name: `LKS-GlueS3Policy` → **Create policy**
+> **AWS Academy:** Skip this step. `LabRole` already exists with required permissions.
+> Use ARN: `arn:aws:iam::{ACCOUNT_ID}:role/LabRole`
 
 ---
 
@@ -230,7 +179,7 @@ aws s3 cp glue/etl_job.py "s3://${PROCESSED_BUCKET}/scripts/etl_job.py"
    - Upload: *(or paste the content of `glue/etl_job.py`)*
 2. **Job details** tab:
    - Name: `lks-etl-paytech`
-   - IAM role: `LKS-GlueETLRole`
+   - IAM role: `LabRole`
    - Glue version: **Glue 4.0**
    - Worker type: **G.025X** | Number of workers: `2`
 3. **Job parameters** → **Add new parameter**:
@@ -252,7 +201,7 @@ Wait for the job run status to show **Succeeded** (check **Runs** tab).
 1. Glue Console → **Crawlers** → **Create crawler**
    - Name: `lks-crawler-paytech`
    - Data source: **S3** → path: `s3://lks-paytech-processed-{ACCOUNT_ID}/parquet/`
-   - IAM role: `LKS-GlueETLRole`
+   - IAM role: `LabRole`
    - Target database: **Add database** → name: `lks_paytech_db` → **Create database**
    - Schedule: **Hourly**
 2. **Create crawler** → **Run crawler**
@@ -279,16 +228,10 @@ SELECT COUNT(*) FROM lks_paytech_db.parquet;
 
 ## Layer 3 — SageMaker Training + Endpoint
 
-### 3.1 SageMaker IAM Role (Console)
+> **AWS Academy:** Cannot call `sagemaker:CreateTrainingJob` from `voclabs` session directly.
+> Must run training inside a SageMaker Notebook Instance (runs as LabRole, bypasses the deny).
 
-1. IAM → **Roles** → **Create role**
-   - Trusted entity: **AWS service** → **SageMaker**
-2. Add: ✅ `AmazonSageMakerFullAccess`
-3. Role name: `LKS-SageMakerRole` → **Create role**
-
----
-
-### 3.2 Upload Training Data (Terminal)
+### 3.1 Upload Training Data (Terminal)
 
 ```bash
 PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
@@ -298,65 +241,189 @@ aws s3 cp data/validation.csv "s3://${PROCESSED_BUCKET}/training/validation.csv"
 
 ---
 
-### 3.3 Create Training Job (Console)
+### 3.2 Create Notebook Instance (Console)
 
-1. Open [SageMaker Console](https://console.aws.amazon.com/sagemaker) → **Training** → **Training jobs** → **Create training job**
-   - Job name: `lks-paytech-training-YYYYMMDD`
-   - IAM role: `LKS-SageMakerRole`
-
-**Algorithm:**
-   - Algorithm source: **AWS marketplace algorithms** → search `XGBoost` → or use **Built-in algorithm**
-   - Select **XGBoost** → version `1.7-1`
-
-**Hyperparameters:**
-
-   | Key | Value |
-   |---|---|
-   | `objective` | `binary:logistic` |
-   | `num_round` | `150` |
-   | `max_depth` | `5` |
-   | `eta` | `0.2` |
-   | `subsample` | `0.8` |
-   | `colsample_bytree` | `0.8` |
-   | `eval_metric` | `auc` |
-   | `scale_pos_weight` | `4` |
-
-**Input data:**
-   - Channel `train`: `s3://lks-paytech-processed-{ACCOUNT_ID}/training/train.csv` | Content type: `text/csv`
-   - Channel `validation`: `s3://lks-paytech-processed-{ACCOUNT_ID}/training/validation.csv` | Content type: `text/csv`
-
-**Output:**
-   - S3 output path: `s3://lks-paytech-processed-{ACCOUNT_ID}/models/`
-
-**Resource config:**
-   - Instance type: `ml.m5.xlarge` | Count: 1 | Volume: 10 GB
-
-2. **Create training job** → wait ~5-10 min for Status: **Completed**
+1. Open [SageMaker Console](https://console.aws.amazon.com/sagemaker) → **Notebook** → **Notebook instances** → **Create notebook instance**
+2. Fill in:
+   - **Notebook instance name**: `lks-fraud-notebook`
+   - **Notebook instance type**: `ml.t3.medium`
+   - **Elastic Inference**: None
+3. Under **Permissions and encryption**:
+   - **IAM role**: click dropdown → **Enter a custom IAM role ARN**
+   - Paste: `arn:aws:iam::{ACCOUNT_ID}:role/LabRole`
+4. Add tags: `Project=nusantara-paytech`, `Environment=production`, `ManagedBy=LKS-Team`
+5. **Create notebook instance** → wait ~3 min for status **InService**
+6. Click **Open JupyterLab** → **File** → **New** → **Notebook** → Kernel: **conda_python3**
 
 ---
 
-### 3.4 Deploy Endpoint (Console)
+### 3.3 Run Training Job (Inside Notebook — Cell 1)
 
-1. SageMaker → **Training jobs** → click your completed job → **Create model**
-   - Model name: `lks-paytech-model`
-   - IAM role: `LKS-SageMakerRole`
-   - Container image: auto-filled from training job
-2. **Create model**
+> All code below runs INSIDE JupyterLab. The notebook instance runs as `LabRole` — `CreateTrainingJob` is allowed.
 
-3. **Inference** → **Endpoint configurations** → **Create endpoint configuration**
-   - Name: `lks-paytech-endpoint-config`
-   - Add production variant: model `lks-paytech-model` | Instance type: `ml.m5.large` | Count: 1
+```python
+import boto3, time
 
-4. **Endpoints** → **Create endpoint**
-   - Name: `lks-paytech-endpoint`
-   - Endpoint configuration: `lks-paytech-endpoint-config`
-5. ⏳ Wait ~8 min for Status: **InService**
+REGION = 'us-east-1'
+sm = boto3.client('sagemaker', region_name=REGION)
+ACCOUNT_ID = boto3.client('sts', region_name=REGION).get_caller_identity()['Account']
+ROLE_ARN = f'arn:aws:iam::{ACCOUNT_ID}:role/LabRole'
+PROCESSED_BUCKET = f'lks-paytech-processed-{ACCOUNT_ID}'
+CONTAINER = f'683313688378.dkr.ecr.{REGION}.amazonaws.com/sagemaker-xgboost:1.7-1'
+JOB_NAME = f'lks-fraud-xgb-{int(time.time())}'
+
+print(f"Account:   {ACCOUNT_ID}")
+print(f"Role:      {ROLE_ARN}")
+print(f"Job name:  {JOB_NAME}")
+print(f"Container: {CONTAINER}")
+
+sm.create_training_job(
+    TrainingJobName=JOB_NAME,
+    RoleArn=ROLE_ARN,
+    AlgorithmSpecification={
+        'TrainingImage': CONTAINER,
+        'TrainingInputMode': 'File',
+    },
+    HyperParameters={
+        'objective': 'binary:logistic',
+        'num_round': '150',
+        'max_depth': '5',
+        'eta': '0.2',
+        'subsample': '0.8',
+        'colsample_bytree': '0.8',
+        'min_child_weight': '1',
+        'eval_metric': 'auc',
+        'scale_pos_weight': '4',
+    },
+    InputDataConfig=[
+        {
+            'ChannelName': 'train',
+            'ContentType': 'text/csv',
+            'DataSource': {'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': f's3://{PROCESSED_BUCKET}/training/train.csv',
+                'S3DataDistributionType': 'FullyReplicated',
+            }},
+        },
+        {
+            'ChannelName': 'validation',
+            'ContentType': 'text/csv',
+            'DataSource': {'S3DataSource': {
+                'S3DataType': 'S3Prefix',
+                'S3Uri': f's3://{PROCESSED_BUCKET}/training/validation.csv',
+                'S3DataDistributionType': 'FullyReplicated',
+            }},
+        },
+    ],
+    OutputDataConfig={'S3OutputPath': f's3://{PROCESSED_BUCKET}/models/'},
+    ResourceConfig={
+        'InstanceType': 'ml.m5.xlarge',
+        'InstanceCount': 1,
+        'VolumeSizeInGB': 10,
+    },
+    StoppingCondition={'MaxRuntimeInSeconds': 600},
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-paytech'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+
+print(f"\nStarted: {JOB_NAME} — polling every 30s...")
+
+while True:
+    resp = sm.describe_training_job(TrainingJobName=JOB_NAME)
+    status = resp['TrainingJobStatus']
+    print(f"  Status: {status}")
+    if status in ('Completed', 'Failed', 'Stopped'):
+        break
+    time.sleep(30)
+
+if status == 'Completed':
+    MODEL_DATA = resp['ModelArtifacts']['S3ModelArtifacts']
+    print(f"\nDone. Model: {MODEL_DATA}")
+else:
+    print(f"\nFailed: {resp.get('FailureReason')}")
+```
+
+Expected time: **5–10 minutes**.
+
+---
+
+### 3.4 Deploy Endpoint (Inside Notebook — Cell 2)
+
+> `MODEL_DATA`, `CONTAINER`, `ROLE_ARN`, `REGION`, `sm` still in memory from Cell 1.
+
+```python
+MODEL_NAME = 'lks-paytech-model'
+CONFIG_NAME = 'lks-paytech-endpoint-config'
+ENDPOINT_NAME = 'lks-paytech-endpoint'
+
+# Create model
+sm.create_model(
+    ModelName=MODEL_NAME,
+    PrimaryContainer={
+        'Image': CONTAINER,
+        'ModelDataUrl': MODEL_DATA,
+    },
+    ExecutionRoleArn=ROLE_ARN,
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-paytech'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+print(f"Model created: {MODEL_NAME}")
+
+# Create endpoint config
+sm.create_endpoint_config(
+    EndpointConfigName=CONFIG_NAME,
+    ProductionVariants=[{
+        'VariantName': 'AllTraffic',
+        'ModelName': MODEL_NAME,
+        'InitialInstanceCount': 1,
+        'InstanceType': 'ml.m5.large',
+        'InitialVariantWeight': 1,
+    }],
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-paytech'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+print(f"Config created: {CONFIG_NAME}")
+
+# Create endpoint
+sm.create_endpoint(
+    EndpointName=ENDPOINT_NAME,
+    EndpointConfigName=CONFIG_NAME,
+    Tags=[
+        {'Key': 'Project', 'Value': 'nusantara-paytech'},
+        {'Key': 'Environment', 'Value': 'production'},
+        {'Key': 'ManagedBy', 'Value': 'LKS-Team'},
+    ],
+)
+print(f"Endpoint creating: {ENDPOINT_NAME} — polling every 30s (~8-10 min)...")
+
+while True:
+    resp = sm.describe_endpoint(EndpointName=ENDPOINT_NAME)
+    status = resp['EndpointStatus']
+    print(f"  Status: {status}")
+    if status == 'InService':
+        print("\nEndpoint ready.")
+        break
+    elif status in ('Failed', 'OutOfService'):
+        print(f"\nFailed: {resp.get('FailureReason')}")
+        break
+    time.sleep(30)
+```
 
 > ⚠️ **This endpoint costs $0.096/hr. Delete immediately after finishing the exam.**
 
 **Layer 3 checkpoint:**
-- [ ] Training job status: Completed
-- [ ] Endpoint status: InService
+- [ ] Notebook cell completes, status = `Completed`
+- [ ] SageMaker console → Training jobs → status: Completed
+- [ ] SageMaker console → Endpoints → `lks-paytech-endpoint` → status: InService
 
 ---
 
@@ -389,37 +456,10 @@ echo "Image pushed: ${ECR_URI}:latest"
 
 ---
 
-### 4.3 IAM Roles for ECS (Console)
+### 4.3 IAM Roles for ECS
 
-**ECS Task Role** (what the container can access):
-1. IAM → **Roles** → **Create role** → **AWS service** → **Elastic Container Service** → **Elastic Container Service Task**
-2. **Next** — skip managed policies → **Next**
-3. Role name: `LKS-ECSTaskRole` → **Create role**
-4. Click role → **Add inline policy** → **JSON**:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": "sagemaker:InvokeEndpoint",
-     "Resource": "arn:aws:sagemaker:ap-southeast-1:ACCOUNT_ID:endpoint/lks-paytech-endpoint"},
-    {"Effect": "Allow", "Action": ["dynamodb:PutItem", "dynamodb:GetItem"],
-     "Resource": "arn:aws:dynamodb:ap-southeast-1:ACCOUNT_ID:table/lks-paytech-predictions"},
-    {"Effect": "Allow", "Action": "s3:PutObject",
-     "Resource": "arn:aws:s3:::lks-paytech-results-ACCOUNT_ID/*"},
-    {"Effect": "Allow",
-     "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-     "Resource": "arn:aws:logs:*:*:*"}
-  ]
-}
-```
-
-Policy name: `LKS-ECSTaskPolicy` → **Create policy**
-
-**ECS Execution Role** (ECS needs this to pull image and push logs):
-1. IAM → **Roles** → **Create role** → **AWS service** → **Elastic Container Service** → **Elastic Container Service Task**
-2. Add: ✅ `AmazonECSTaskExecutionRolePolicy`
-3. Role name: `LKS-ECSExecutionRole` → **Create role**
+> **AWS Academy:** Skip this step. `LabRole` already exists with required permissions for both task role and execution role.
+> Use ARN: `arn:aws:iam::{ACCOUNT_ID}:role/LabRole` for both **Task role** and **Task execution role**.
 
 ---
 
@@ -442,7 +482,7 @@ Policy name: `LKS-ECSTaskPolicy` → **Create policy**
 1. [EC2 Console](https://console.aws.amazon.com/ec2) → **Load balancers** → **Create load balancer** → **Application Load Balancer**
    - Name: `lks-paytech-alb`
    - Scheme: **Internet-facing** | IP type: IPv4
-   - VPC: **default** | Subnets: select `ap-southeast-1a` and `ap-southeast-1b`
+   - VPC: **default** | Subnets: select `us-east-1a` and `us-east-1b`
    - Security groups: `lks-paytech-alb-sg`
 
 2. **Listeners and routing** → Create a target group:
@@ -456,7 +496,7 @@ Policy name: `LKS-ECSTaskPolicy` → **Create policy**
 
 3. **Create load balancer**
 
-Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.ap-southeast-1.elb.amazonaws.com`)
+Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.us-east-1.elb.amazonaws.com`)
 
 ---
 
@@ -481,12 +521,12 @@ Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.ap-southeast-1.elb.
    - Launch type: **AWS Fargate**
    - OS/Architecture: Linux/x86_64
    - CPU: `0.5 vCPU` | Memory: `1 GB`
-   - Task role: `LKS-ECSTaskRole`
-   - Task execution role: `LKS-ECSExecutionRole`
+   - Task role: `LabRole`
+   - Task execution role: `LabRole`
 
 2. **Container** → **Add container**:
    - Name: `inference-api`
-   - Image URI: `{ACCOUNT_ID}.dkr.ecr.ap-southeast-1.amazonaws.com/lks-paytech-api:latest`
+   - Image URI: `{ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/lks-paytech-api:latest`
    - Container port: `8080`
 
 3. **Environment variables** (Add 4):
@@ -496,7 +536,7 @@ Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.ap-southeast-1.elb.
    | `SAGEMAKER_ENDPOINT_NAME` | `lks-paytech-endpoint` |
    | `DYNAMODB_TABLE` | `lks-paytech-predictions` |
    | `RESULTS_BUCKET` | `lks-paytech-results-{ACCOUNT_ID}` |
-   | `AWS_DEFAULT_REGION` | `ap-southeast-1` |
+   | `AWS_DEFAULT_REGION` | `us-east-1` |
 
 4. **Logging** → select **Use log collection** → log group: `/ecs/lks-paytech-task`
 
@@ -515,7 +555,7 @@ Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.ap-southeast-1.elb.
    - Desired tasks: `1`
 
 2. **Networking**:
-   - VPC: default | Subnets: `ap-southeast-1a`, `ap-southeast-1b`
+   - VPC: default | Subnets: `us-east-1a`, `us-east-1b`
    - Security group: `lks-paytech-ecs-sg`
    - Public IP: **Turned on**
 
@@ -583,7 +623,7 @@ curl -s -X POST http://$ALB_DNS/predict \
 
 4. **Stages** → default stage is `$default` with auto-deploy enabled
 
-5. Note the **Invoke URL** (e.g., `https://abc123.execute-api.ap-southeast-1.amazonaws.com`)
+5. Note the **Invoke URL** (e.g., `https://abc123.execute-api.us-east-1.amazonaws.com`)
 
 6. **CORS** tab → **Configure**:
    - Allow origins: `*`
@@ -593,7 +633,7 @@ curl -s -X POST http://$ALB_DNS/predict \
 
 Test in terminal:
 ```bash
-API_URL="https://{your-api-id}.execute-api.ap-southeast-1.amazonaws.com"
+API_URL="https://{your-api-id}.execute-api.us-east-1.amazonaws.com"
 curl -X POST "$API_URL/predict" \
   -H "Content-Type: application/json" \
   -d @data/test_predict.json
@@ -610,7 +650,7 @@ curl -X POST "$API_URL/predict" \
 
 **Prepare and upload (Terminal):**
 ```bash
-API_URL="https://{YOUR_API_ID}.execute-api.ap-southeast-1.amazonaws.com"
+API_URL="https://{YOUR_API_ID}.execute-api.us-east-1.amazonaws.com"
 
 sed "s|__API_GATEWAY_URL__|${API_URL}|g" \
   app/frontend/index.html > /tmp/index.html
@@ -660,23 +700,23 @@ echo "App URL: https://main.${AMPLIFY_APP_ID}.amplifyapp.com"
 
 5. **SageMaker Console → Endpoints** → `lks-paytech-endpoint` → **Delete** ⚠️ PRIORITY
 
-6. **SageMaker → Models** → `lks-paytech-model` → **Delete**
+6. **SageMaker Console → Models** → `lks-paytech-model` → **Delete**
 
-7. **ECR Console** → `lks-paytech-api` → **Delete**
+7. **SageMaker Console → Notebook instances** → `lks-fraud-notebook` → **Stop** → **Delete**
 
-8. **Glue Console → Jobs** → `lks-etl-paytech` → **Delete**
+8. **ECR Console** → `lks-paytech-api` → **Delete**
+
+9. **Glue Console → Jobs** → `lks-etl-paytech` → **Delete**
    - **Crawlers** → `lks-crawler-paytech` → **Delete**
    - **Databases** → `lks_paytech_db` → **Delete**
 
-9. **Lambda Console** → `lks-feature-trigger` → **Delete**
+10. **Lambda Console** → `lks-feature-trigger` → **Delete**
 
-10. **DynamoDB Console** → `lks-paytech-predictions` → **Delete table**
+11. **DynamoDB Console** → `lks-paytech-predictions` → **Delete table**
 
-11. **SQS Console** → `lks-paytech-queue` → **Delete**
+12. **SQS Console** → `lks-paytech-queue` → **Delete**
 
-12. **S3 Console** → empty and delete all 4 `lks-paytech-*` buckets
-
-13. **IAM Console** → delete roles: `LKS-FeatureLambdaRole`, `LKS-GlueETLRole`, `LKS-SageMakerRole`, `LKS-ECSTaskRole`, `LKS-ECSExecutionRole`
+13. **S3 Console** → empty and delete all 4 `lks-paytech-*` buckets
 
 ---
 
@@ -686,9 +726,11 @@ echo "App URL: https://main.${AMPLIFY_APP_ID}.amplifyapp.com"
 |---|---|---|
 | S3 event not triggering SQS | SQS policy missing S3 source ARN | Check SQS Access Policy matches exact bucket ARN |
 | Lambda error: `KeyError` | CSV missing column | Verify `sample_transactions.csv` has all 10 columns |
-| Glue job fails | ETL script path wrong or permissions | Check S3 path matches and Glue role has S3 access |
+| Glue job fails | ETL script path wrong or permissions | Check S3 path matches and LabRole has S3 access |
+| `AccessDenied: sagemaker:CreateTrainingJob` from CLI | `Pvoclabs2` explicit deny on voclabs session | Run training from inside notebook instance (LabRole) |
+| `no module named sagemaker.estimator` | SageMaker SDK v3 broke import paths | Use boto3 direct approach in Layer 3 (no SDK needed) |
 | SageMaker training fails | S3 input path wrong | Ensure `train.csv` is at the correct S3 URI |
 | ECS task keeps stopping | Container missing env var or IAM issue | CloudWatch Logs → `/ecs/lks-paytech-task` |
 | ALB health check unhealthy | FastAPI still starting | Wait 30s — `startPeriod=15` in health check config |
-| `POST /predict` → 503 | SageMaker endpoint deleted | Redeploy endpoint from SageMaker console |
-| DynamoDB write fails | ECS task role missing `dynamodb:PutItem` | Add permission to `LKS-ECSTaskRole` inline policy |
+| `POST /predict` → 503 | SageMaker endpoint deleted | Redeploy endpoint from notebook |
+| DynamoDB write fails | Check LabRole has `dynamodb:PutItem` | LabRole should have full DynamoDB access |
