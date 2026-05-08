@@ -8,19 +8,19 @@
 > - `voclabs` session denies `sagemaker:CreateTrainingJob` directly → train inside a Notebook Instance
 > - Region: **us-east-1**
 
-> **Terminal required for**: Docker build/push, zip/deploy Lambda, Glue job polling, and kubectl-equivalent CLI steps. Everything else is in the AWS Console.
+> **Terminal required for**: Docker build/push, and helm. Everything else uses the AWS Console.
 
 ---
 
 ## Layers
 
-| Layer | Console | Terminal |
+| Layer | Console | Terminal (docker only) |
 |---|---|---|
-| **1** | S3 buckets, SQS queue, SQS policy, S3 event notification | Package + deploy Lambda |
-| **2** | Glue job, Crawler, Athena workgroup | Run ETL job, query Athena |
-| **3** | SageMaker Notebook Instance → training + endpoint | Upload data, run boto3 training cell |
+| **1** | S3 buckets, SQS queue, SQS policy, S3 event notification, Lambda | — |
+| **2** | Glue job, Crawler, Athena workgroup | — |
+| **3** | SageMaker Notebook Instance → training + endpoint via boto3 | — |
 | **4** | ECR repo, ECS cluster, task def, ALB, security groups, ECS service | Docker build/push |
-| **5** | DynamoDB table, API Gateway, Amplify | Deploy frontend |
+| **5** | DynamoDB table, API Gateway, Amplify | — |
 
 ---
 
@@ -98,59 +98,61 @@ Note the **Queue ARN** (visible in queue details).
 
 ---
 
-### 1.5 Deploy Lambda (Terminal)
+### 1.5 Deploy Lambda (Console)
 
-```bash
-export AWS_REGION=us-east-1
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"
+**Prepare zip on your local machine:**
+1. Open terminal in `lks-ml-pipeline/app/feature_lambda/`
+2. Run: `zip /tmp/lks-feature-trigger.zip handler.py`
 
-# AWS Academy: skip IAM role creation — use LabRole instead
-# arn:aws:iam::${ACCOUNT_ID}:role/LabRole
+**Create Lambda function:**
+1. **Lambda console** → **Create function** → **Author from scratch**
+   - Function name: `lks-feature-trigger`
+   - Runtime: Python 3.12
+   - Architecture: x86_64
+2. **Permissions** → **Change default execution role** → **Use an existing role** → select `LabRole`
+3. **Create function**
 
-cd app/feature_lambda/
-zip /tmp/lks-feature-trigger.zip handler.py
-cd -
+**Upload code:**
+1. **Code** tab → **Upload from** → **.zip file** → upload `/tmp/lks-feature-trigger.zip`
+2. Handler: `handler.handler` → **Save**
 
-aws lambda create-function \
-  --function-name lks-feature-trigger \
-  --runtime python3.12 \
-  --handler handler.handler \
-  --role "arn:aws:iam::${ACCOUNT_ID}:role/LabRole" \
-  --zip-file fileb:///tmp/lks-feature-trigger.zip \
-  --timeout 300 \
-  --memory-size 256 \
-  --environment "Variables={FEATURES_BUCKET=${FEATURES_BUCKET}}" \
-  --region $AWS_REGION
+**Set environment variables:**
+1. **Configuration** tab → **Environment variables** → **Edit**
+2. Add: `FEATURES_BUCKET` = `lks-paytech-features-{YOUR_ACCOUNT_ID}`
+3. **Save**
 
-QUEUE_ARN=$(aws sqs get-queue-attributes \
-  --queue-url "https://sqs.${AWS_REGION}.amazonaws.com/${ACCOUNT_ID}/lks-paytech-queue" \
-  --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
+**Set timeout and memory:**
+1. **Configuration** tab → **General configuration** → **Edit**
+2. Timeout: `5 min 0 sec` | Memory: `256 MB` → **Save**
 
-aws lambda create-event-source-mapping \
-  --function-name lks-feature-trigger \
-  --event-source-arn "$QUEUE_ARN" \
-  --batch-size 10
+**Add SQS trigger:**
+1. **Configuration** tab → **Triggers** → **Add trigger**
+2. Source: **SQS**
+3. SQS queue: select `lks-paytech-queue`
+4. Batch size: `10`
+5. **Add**
 
-echo "Lambda deployed!"
-```
+---
 
-### 1.6 Test Layer 1 (Terminal)
+### 1.6 Test Layer 1 (Console)
 
-```bash
-RAW_BUCKET="lks-paytech-raw-${ACCOUNT_ID}"
-FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"
+**Upload test file:**
+1. **S3 console** → open `lks-paytech-raw-{ACCOUNT_ID}` bucket
+2. Click **Create folder** → name: `data` → **Create folder**
+3. Open `data/` folder → **Upload** → **Add files** → select `data/sample_transactions.csv` → **Upload**
 
-aws s3 cp data/sample_transactions.csv "s3://${RAW_BUCKET}/data/sample_transactions.csv"
-echo "Waiting 30s for processing..."
-sleep 30
-aws s3 ls "s3://${FEATURES_BUCKET}/features/"
-# Expected: features/sample_transactions.csv
-```
+**Verify processing:**
+1. Wait ~30 seconds
+2. S3 console → open `lks-paytech-features-{ACCOUNT_ID}` bucket
+3. Open `features/` folder — should contain `sample_transactions.csv`
+
+**Check Lambda logs (if features file missing):**
+1. Lambda console → `lks-feature-trigger` → **Monitor** tab → **View CloudWatch logs**
+2. Open the latest log stream → check for errors
 
 **Layer 1 checkpoint:**
-- [ ] Features file appears in S3 features bucket
-- [ ] Lambda function is visible in Lambda Console
+- [ ] `features/sample_transactions.csv` visible in S3 features bucket
+- [ ] Lambda function visible in Lambda Console with SQS trigger
 
 ---
 
@@ -163,12 +165,11 @@ aws s3 ls "s3://${FEATURES_BUCKET}/features/"
 
 ---
 
-### 2.2 Upload ETL Script (Terminal)
+### 2.2 Upload ETL Script (Console)
 
-```bash
-PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
-aws s3 cp glue/etl_job.py "s3://${PROCESSED_BUCKET}/scripts/etl_job.py"
-```
+1. **S3 console** → open `lks-paytech-processed-{ACCOUNT_ID}` bucket
+2. Click **Create folder** → name: `scripts` → **Create folder**
+3. Open `scripts/` folder → **Upload** → **Add files** → select `glue/etl_job.py` → **Upload**
 
 ---
 
@@ -231,13 +232,11 @@ SELECT COUNT(*) FROM lks_paytech_db.parquet;
 > **AWS Academy:** Cannot call `sagemaker:CreateTrainingJob` from `voclabs` session directly.
 > Must run training inside a SageMaker Notebook Instance (runs as LabRole, bypasses the deny).
 
-### 3.1 Upload Training Data (Terminal)
+### 3.1 Upload Training Data (Console)
 
-```bash
-PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
-aws s3 cp data/train.csv "s3://${PROCESSED_BUCKET}/training/train.csv"
-aws s3 cp data/validation.csv "s3://${PROCESSED_BUCKET}/training/validation.csv"
-```
+1. **S3 console** → open `lks-paytech-processed-{ACCOUNT_ID}` bucket
+2. Click **Create folder** → name: `training` → **Create folder**
+3. Open `training/` folder → **Upload** → **Add files** → select both `data/train.csv` and `data/validation.csv` → **Upload**
 
 ---
 
@@ -250,7 +249,7 @@ aws s3 cp data/validation.csv "s3://${PROCESSED_BUCKET}/training/validation.csv"
    - **Elastic Inference**: None
 3. Under **Permissions and encryption**:
    - **IAM role**: click dropdown → **Enter a custom IAM role ARN**
-   - Paste: `arn:aws:iam::{ACCOUNT_ID}:role/LabRole`
+   - Paste: `arn:aws:iam::{YOUR_ACCOUNT_ID}:role/LabRole`
 4. Add tags: `Project=nusantara-paytech`, `Environment=production`, `ManagedBy=LKS-Team`
 5. **Create notebook instance** → wait ~3 min for status **InService**
 6. Click **Open JupyterLab** → **File** → **New** → **Notebook** → Kernel: **conda_python3**
@@ -260,6 +259,7 @@ aws s3 cp data/validation.csv "s3://${PROCESSED_BUCKET}/training/validation.csv"
 ### 3.3 Run Training Job (Inside Notebook — Cell 1)
 
 > All code below runs INSIDE JupyterLab. The notebook instance runs as `LabRole` — `CreateTrainingJob` is allowed.
+> Uses **boto3 directly** — no SageMaker SDK import, no version issues.
 
 ```python
 import boto3, time
@@ -442,6 +442,8 @@ while True:
 ### 4.2 Build + Push Docker Image (Terminal)
 
 ```bash
+export AWS_REGION=us-east-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/lks-paytech-api"
 
 aws ecr get-login-password --region $AWS_REGION \
@@ -496,7 +498,7 @@ echo "Image pushed: ${ECR_URI}:latest"
 
 3. **Create load balancer**
 
-Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.us-east-1.elb.amazonaws.com`)
+Note the **DNS name** of the ALB from the console (e.g., `lks-paytech-alb-xxx.us-east-1.elb.amazonaws.com`)
 
 ---
 
@@ -569,12 +571,17 @@ Note the **DNS name** of the ALB (e.g., `lks-paytech-alb-xxx.us-east-1.elb.amazo
 
 > ⏳ Wait ~3 minutes for the task to show **Running** and the target group health check to pass.
 
-### 4.9 Test ECS (Terminal)
+---
 
+### 4.9 Test ECS
+
+**Get ALB DNS from console:**
+1. **EC2 console** → **Load Balancers** → click `lks-paytech-alb`
+2. Copy the **DNS name** (e.g., `lks-paytech-alb-xxx.us-east-1.elb.amazonaws.com`)
+
+**Test (terminal):**
 ```bash
-ALB_DNS=$(aws elbv2 describe-load-balancers \
-  --names lks-paytech-alb \
-  --query 'LoadBalancers[0].DNSName' --output text)
+ALB_DNS="paste-your-alb-dns-here"
 
 curl -s http://$ALB_DNS/health
 # Expected: {"status":"ok","endpoint":"lks-paytech-endpoint"}
@@ -631,50 +638,39 @@ curl -s -X POST http://$ALB_DNS/predict \
    - Allow headers: `Content-Type`
    - **Save**
 
-Test in terminal:
-```bash
-API_URL="https://{your-api-id}.execute-api.us-east-1.amazonaws.com"
-curl -X POST "$API_URL/predict" \
-  -H "Content-Type: application/json" \
-  -d @data/test_predict.json
+**Test from browser or Postman:**
+```
+POST https://{your-api-id}.execute-api.us-east-1.amazonaws.com/predict
+Content-Type: application/json
+Body: (contents of data/test_predict.json)
 ```
 
 ---
 
 ### 5.3 Amplify Frontend (Console)
 
-1. Open [Amplify Console](https://console.aws.amazon.com/amplify)
-2. **New app** → **Host web app** → **Deploy without Git**
-3. App name: `lks-paytech-ui` → **Continue**
-4. First create a branch: **main** → **Next**
+**Step 1 — Edit index.html locally:**
+1. Open `app/frontend/index.html` in a text editor (VS Code, Notepad++, etc.)
+2. Find: `__API_GATEWAY_URL__`
+3. Replace with your API Gateway invoke URL from Step 5.2 (e.g., `https://abc123.execute-api.us-east-1.amazonaws.com`)
+4. Save the file
 
-**Prepare and upload (Terminal):**
-```bash
-API_URL="https://{YOUR_API_ID}.execute-api.us-east-1.amazonaws.com"
+**Step 2 — Create deploy zip:**
+1. Create a new folder (e.g., `amplify-build/`)
+2. Copy the edited `index.html` into `amplify-build/`
+3. Zip the contents → `amplify-deploy.zip` (`index.html` must be at the zip root, not inside a subfolder)
 
-sed "s|__API_GATEWAY_URL__|${API_URL}|g" \
-  app/frontend/index.html > /tmp/index.html
+**Step 3 — Deploy to Amplify:**
+1. **Amplify console** → **Create new app**
+2. Select **Host your web app** → **Deploy without Git provider** → **Continue**
+3. App name: `lks-paytech-ui`
+4. Environment name: `main`
+5. Drag and drop `amplify-deploy.zip` onto the upload area
+6. Click **Save and deploy** → wait for status **Deployed**
 
-cd /tmp && zip -q amplify-deploy.zip index.html && cd -
-
-AMPLIFY_APP_ID=$(aws amplify list-apps \
-  --query "apps[?name=='lks-paytech-ui'].appId" --output text)
-
-DEPLOYMENT=$(aws amplify create-deployment \
-  --app-id "$AMPLIFY_APP_ID" \
-  --branch-name main --output json)
-
-UPLOAD_URL=$(echo "$DEPLOYMENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['zipUploadUrl'])")
-JOB_ID=$(echo "$DEPLOYMENT" | python3 -c "import sys,json; print(json.load(sys.stdin)['jobId'])")
-
-curl -s -X PUT -H "Content-Type: application/zip" \
-  --data-binary @/tmp/amplify-deploy.zip "$UPLOAD_URL"
-
-aws amplify start-deployment \
-  --app-id "$AMPLIFY_APP_ID" --branch-name main --job-id "$JOB_ID"
-
-echo "App URL: https://main.${AMPLIFY_APP_ID}.amplifyapp.com"
-```
+**Step 4 — Verify:**
+1. Copy the domain URL from Amplify (e.g., `https://main.xxxxxx.amplifyapp.com`)
+2. Open in browser → submit a test transaction → verify fraud score appears
 
 **Layer 5 checkpoint:**
 - [ ] API Gateway invoke URL returns prediction JSON
@@ -717,6 +713,8 @@ echo "App URL: https://main.${AMPLIFY_APP_ID}.amplifyapp.com"
 12. **SQS Console** → `lks-paytech-queue` → **Delete**
 
 13. **S3 Console** → empty and delete all 4 `lks-paytech-*` buckets
+
+> **AWS Academy:** Do NOT delete Lab roles.
 
 ---
 
