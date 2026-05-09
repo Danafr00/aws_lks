@@ -10,7 +10,7 @@
 
 | Layer | What You Build | Test |
 |---|---|---|
-| **1** | VPC + IAM + EKS + Nodes (with SSH) + Hello App | ALB serves Hello World |
+| **1** | VPC + IAM + EKS + Nodes (with SSH) + Hello App | Classic ELB serves Hello World |
 | **2** | ECR + Containerized App | Pods pull from ECR |
 | **3** | RDS PostgreSQL | App connects to DB |
 | **4** | EFS Shared Storage | Pods read/write shared files |
@@ -194,13 +194,6 @@ NODE_ROLE_ARN=$(aws iam get-role --role-name LKS-EKSNodeRole \
   --query 'Role.Arn' --output text)
 echo "Node Role: $NODE_ROLE_ARN"
 
-# ── Download LBC IAM policy ───────────────────────────────────
-curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
-aws iam create-policy \
-  --policy-name AWSLoadBalancerControllerIAMPolicy \
-  --policy-document file://iam_policy.json
-LBC_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy"
-
 echo "--- IAM done ---"
 ```
 
@@ -268,66 +261,11 @@ kubectl get nodes
 > ssh -i ~/.ssh/lks-eks-key.pem ec2-user@<node-private-ip>
 > ```
 
-### 1.8 OIDC + Load Balancer Controller
+### 1.8 Deploy Hello App
 
-```bash
-# Enable OIDC
-OIDC_URL=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION \
-  --query "cluster.identity.oidc.issuer" --output text)
-OIDC_ID=$(echo $OIDC_URL | awk -F'/' '{print $NF}')
-
-THUMBPRINT=$(echo | openssl s_client \
-  -connect oidc.eks.${AWS_REGION}.amazonaws.com:443 2>/dev/null \
-  | openssl x509 -fingerprint -sha1 -noout \
-  | sed 's/.*=//;s/://g' | tr '[:upper:]' '[:lower:]')
-
-aws iam create-open-id-connect-provider \
-  --url $OIDC_URL \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list $THUMBPRINT
-
-# LBC IRSA role
-cat > /tmp/lbc-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {"StringEquals": {
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:aud": "sts.amazonaws.com"
-    }}
-  }]
-}
-EOF
-
-aws iam create-role --role-name LKS-LBCRole \
-  --assume-role-policy-document file:///tmp/lbc-trust.json
-aws iam attach-role-policy --role-name LKS-LBCRole --policy-arn $LBC_POLICY_ARN
-
-LBC_ROLE_ARN=$(aws iam get-role --role-name LKS-LBCRole \
-  --query 'Role.Arn' --output text)
-
-# Install LBC via Helm
-kubectl create serviceaccount aws-load-balancer-controller -n kube-system
-kubectl annotate serviceaccount aws-load-balancer-controller -n kube-system \
-  eks.amazonaws.com/role-arn=$LBC_ROLE_ARN
-
-helm repo add eks https://aws.github.io/eks-charts && helm repo update
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=$CLUSTER_NAME \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set region=$AWS_REGION \
-  --set vpcId=$VPC_ID
-
-kubectl rollout status deployment aws-load-balancer-controller -n kube-system
-```
-
-### 1.9 Deploy Hello App
+> **AWS Academy note:** `iam:CreateOpenIDConnectProvider` is blocked. Skip LBC entirely — use `Service type=LoadBalancer`. The EKS in-tree cloud provider creates a Classic ELB using the cluster's IAM role (`AmazonEKSClusterPolicy` includes `elasticloadbalancing:*`). No OIDC, no Helm, no extra IAM needed.
+>
+> Subnets must be tagged with `kubernetes.io/cluster/<cluster-name>` and `kubernetes.io/role/elb` for the in-tree provider to discover them (already done in step 1.2).
 
 Verify everything works before adding more services.
 
@@ -366,45 +304,23 @@ spec:
     app: wallet-app
   ports:
   - port: 80
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: wallet-ingress
-  namespace: wallet
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
-spec:
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: wallet-api-svc
-            port:
-              number: 80
+  type: LoadBalancer
 EOF
 
 kubectl get pods -n wallet --watch
 # Wait for Running, then Ctrl+C
 
-kubectl get ingress wallet-ingress -n wallet --watch
-# Wait for ADDRESS, then:
-ALB=$(kubectl get ingress wallet-ingress -n wallet \
+kubectl get svc wallet-api-svc -n wallet --watch
+# Wait for EXTERNAL-IP column (1-2 min), then:
+ELB=$(kubectl get svc wallet-api-svc -n wallet \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl http://$ALB
+curl http://$ELB
 # Expected: nginx welcome page
 ```
 
 **Layer 1 checkpoint** — before continuing:
 - [ ] `kubectl get nodes` shows Ready
-- [ ] `curl http://$ALB` returns a response
+- [ ] `curl http://$ELB` returns a response
 - [ ] `aws ssm start-session --target $NODE_ID` opens a shell
 
 ---
@@ -464,16 +380,14 @@ echo "Image pushed: ${ECR_URI}:v1.0.0"
 
 ### 2.3 Replace Hello-App with Real Deployment
 
-Hello-app verified the ALB works. Now delete it and apply the real manifests from `k8s/`.
+Hello-app verified the Classic ELB works. Now delete it and apply the real manifests from `k8s/`.
 
 ```bash
 # Delete hello-app — it has served its purpose
 kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
-# Apply real deployment + service (service.yaml updates selector → app: wallet-api)
-# Keep the Layer 1 wallet-ingress — it already works for HTTP testing
-# k8s/ingress.yaml is the production HTTPS version; apply it in Layer 6 after ACM cert setup
+# Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
 sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
 
@@ -584,7 +498,7 @@ POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metada
 kubectl exec -it $POD -n wallet -- sh -c "nc -zv $DB_ENDPOINT 5432 && echo 'DB reachable!'"
 kubectl logs $POD -n wallet | tail -5
 # Expected: "Migration complete" and "Listening on :8080"
-curl http://$ALB/health/ready
+curl http://$ELB/health/ready
 # Expected: HTTP 200
 ```
 
@@ -657,28 +571,8 @@ aws iam create-policy --policy-name LKS-EFSCSIPolicy \
   --policy-document file:///tmp/efs-csi-policy.json
 EFS_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/LKS-EFSCSIPolicy"
 
-cat > /tmp/efs-csi-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {"StringEquals": {
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:sub": "system:serviceaccount:kube-system:efs-csi-controller-sa",
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:aud": "sts.amazonaws.com"
-    }}
-  }]
-}
-EOF
-
-aws iam create-role --role-name LKS-EFSCSIDriverRole \
-  --assume-role-policy-document file:///tmp/efs-csi-trust.json
-aws iam attach-role-policy --role-name LKS-EFSCSIDriverRole \
-  --policy-arn $EFS_POLICY_ARN
-EFS_CSI_ROLE_ARN=$(aws iam get-role --role-name LKS-EFSCSIDriverRole \
-  --query 'Role.Arn' --output text)
+# AWS Academy: iam:CreateRole blocked — use LabRole ARN directly
+EFS_CSI_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
 aws eks create-addon \
   --cluster-name $CLUSTER_NAME \
@@ -764,28 +658,8 @@ aws iam create-policy --policy-name LKS-WalletAppPolicy \
   --policy-document file:///tmp/wallet-app-policy.json
 WALLET_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/LKS-WalletAppPolicy"
 
-cat > /tmp/wallet-app-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {"StringEquals": {
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:sub": "system:serviceaccount:wallet:wallet-api-sa",
-      "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:aud": "sts.amazonaws.com"
-    }}
-  }]
-}
-EOF
-
-aws iam create-role --role-name LKS-WalletAppRole \
-  --assume-role-policy-document file:///tmp/wallet-app-trust.json
-aws iam attach-role-policy --role-name LKS-WalletAppRole \
-  --policy-arn $WALLET_POLICY_ARN
-WALLET_ROLE_ARN=$(aws iam get-role --role-name LKS-WalletAppRole \
-  --query 'Role.Arn' --output text)
+# AWS Academy: iam:CreateRole blocked — use LabRole ARN directly
+WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
 kubectl create serviceaccount wallet-api-sa -n wallet
 kubectl annotate serviceaccount wallet-api-sa -n wallet \
@@ -881,7 +755,10 @@ Everything works manually. Now automate it: `git push` → build → push ECR �
 
 ### 6.1 GitHub OIDC Provider
 
+> **AWS Academy:** `iam:CreateOpenIDConnectProvider` is blocked. Skip sections 6.1 and 6.2 — use static credentials stored as GitHub secrets instead (see section 6.3).
+
 ```bash
+# Non-Academy only: skip this block in AWS Academy
 aws iam create-open-id-connect-provider \
   --url https://token.actions.githubusercontent.com \
   --client-id-list sts.amazonaws.com \
@@ -1004,7 +881,7 @@ kubectl rollout history deployment/wallet-api -n wallet
 **Layer 6 checkpoint:**
 - [ ] All 3 GitHub Actions jobs passed
 - [ ] Pod image tag matches the git commit SHA
-- [ ] `curl http://$ALB/health/live` returns 200
+- [ ] `curl http://$ELB/health/live` returns 200
 
 ---
 
@@ -1013,7 +890,6 @@ kubectl rollout history deployment/wallet-api -n wallet
 ```bash
 # 1. Delete k8s resources
 kubectl delete namespace wallet
-helm uninstall aws-load-balancer-controller -n kube-system
 helm uninstall external-secrets -n external-secrets
 
 # 2. Delete node group
@@ -1091,7 +967,7 @@ echo "All resources deleted"
 Internet
     │ HTTP :80
     ▼
-ALB  (internet-facing, public subnets)
+Classic ELB  (internet-facing, public subnets)
     │
     ▼
 wallet-api pods  (private subnets, m7i-flex.large)

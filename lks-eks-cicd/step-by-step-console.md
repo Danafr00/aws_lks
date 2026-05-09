@@ -8,8 +8,8 @@
 > - Cannot create IAM roles → use pre-created Lab roles
 > - EKS cluster role: `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ`
 > - EKS node role: `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ`
-> - All other roles (LBC, EFS CSI, app workloads, GitHub Actions): use `LabRole`
-> - OIDC/IRSA setup may be blocked (`iam:CreateOpenIDConnectProvider` denied) — annotate service accounts with `LabRole` ARN directly
+> - All other roles (EFS CSI, app workloads, GitHub Actions): use `LabRole`
+> - OIDC/IRSA is blocked (`iam:CreateOpenIDConnectProvider` denied) — use `Service type=LoadBalancer` (Classic ELB via in-tree cloud provider) instead of AWS Load Balancer Controller
 > - Region: **us-east-1**
 
 > **Note**: kubectl, helm, and docker commands have no console equivalent. Each layer ends with a short terminal block for those. Everything else can be done in the AWS Console.
@@ -20,7 +20,7 @@
 
 | Layer | Console | Terminal |
 |---|---|---|
-| **1** | VPC + SGs + Key Pair + EKS + Node Group + OIDC | Install LBC (using LabRole), deploy Hello App |
+| **1** | VPC + SGs + Key Pair + EKS + Node Group | Deploy Hello App with Classic ELB |
 | **2** | Create ECR repository | Build + push image, update deployment |
 | **3** | RDS subnet group + instance | Connect app to DB |
 | **4** | EFS + mount targets + CSI add-on | Install EFS CSI addon, mount into pods |
@@ -49,7 +49,7 @@
 
 ### 1.2 Subnets
 
-Create 4 subnets total: 2 public (for ALB), 2 private (for nodes, RDS, EFS).
+Create 4 subnets total: 2 public (for Classic ELB), 2 private (for nodes, RDS, EFS).
 
 **Public Subnet 1 (AZ a)**
 1. **Subnets** → **Create subnet** → VPC: `lks-wallet-vpc`
@@ -78,14 +78,16 @@ Create 4 subnets total: 2 public (for ALB), 2 private (for nodes, RDS, EFS).
 
 ### 1.3 Subnet Tags
 
-Tags are **required** — LBC uses them to discover where to put the ALB.
+Tags are **required** — the EKS in-tree cloud provider uses them to discover which subnets to place the Classic ELB in.
+
+> **Important:** Use your actual cluster name in the tag key (e.g. `lks-wallet-eks-dana` not just `lks-wallet-eks`).
 
 **On both public subnets** (`lks-public-1a` and `lks-public-1b`):
 1. Select subnet → **Tags** tab → **Manage tags** → **Add tag**
 
    | Key | Value |
    |---|---|
-   | `kubernetes.io/cluster/lks-wallet-eks` | `owned` |
+   | `kubernetes.io/cluster/<your-cluster-name>` | `owned` |
    | `kubernetes.io/role/elb` | `1` |
 
 2. **Save**
@@ -95,7 +97,7 @@ Tags are **required** — LBC uses them to discover where to put the ALB.
 
    | Key | Value |
    |---|---|
-   | `kubernetes.io/cluster/lks-wallet-eks` | `owned` |
+   | `kubernetes.io/cluster/<your-cluster-name>` | `owned` |
    | `kubernetes.io/role/internal-elb` | `1` |
 
 2. **Save**
@@ -196,18 +198,6 @@ Note the Security Group ID — you will need it when creating the node group.
 | EKS Cluster Role | `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ` |
 | EKS Node Role | `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ` |
 
-**LBC IAM Policy** — this policy still needs to be created (policies are allowed, only role creation is blocked):
-
-First download the policy JSON (terminal):
-```bash
-curl -sO https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json
-```
-
-Then in console:
-1. IAM Console → **Policies** → **Create policy** → **JSON** tab
-2. Paste the full contents of `iam_policy.json`
-3. **Next** → Policy name: `AWSLoadBalancerControllerIAMPolicy` → **Create policy**
-
 ---
 
 ### 1.10 EKS Cluster
@@ -237,25 +227,16 @@ Then in console:
 
 > ⏳ Wait ~12 minutes for Status: **Active**
 
-Grant your CLI identity cluster-admin access (terminal):
-```bash
-export AWS_REGION=us-east-1
-export CLUSTER_NAME=lks-wallet-eks
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-CLI_ARN=$(aws sts get-caller-identity --query Arn --output text)
+Grant your identity cluster-admin access (Console):
 
-aws eks create-access-entry \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $CLI_ARN \
-  --region $AWS_REGION
-
-aws eks associate-access-policy \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $CLI_ARN \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
-  --access-scope type=cluster \
-  --region $AWS_REGION
-```
+1. EKS Console → `lks-wallet-eks` → **Access** tab → **Create access entry**
+2. **IAM principal ARN**: paste your voclabs ARN from `AWS Details` → `AWS CLI` → `aws_sts_credentials_command` → copy the `--role-arn` value (looks like `arn:aws:sts::ACCOUNT_ID:assumed-role/voclabs/...`)
+   - Alternatively run in terminal: `aws sts get-caller-identity --query Arn --output text`
+3. **Type**: **Standard**
+4. **Next** → **Add access policy**:
+   - Policy name: `AmazonEKSClusterAdminPolicy`
+   - Access scope: **Cluster**
+5. **Add policy** → **Next** → **Create**
 
 Connect kubectl (terminal):
 ```bash
@@ -304,64 +285,17 @@ kubectl get nodes
 
 ---
 
-### 1.12 OIDC Provider
+### 1.12 Deploy Hello App (Terminal)
 
-> **AWS Academy:** `iam:CreateOpenIDConnectProvider` may be denied. Try the steps below — if they fail, skip to 1.13 and use `LabRole` directly without IRSA.
-
-1. EKS Console → `lks-wallet-eks` → **Overview** tab → copy **OpenID Connect provider URL**
-   - Example: `https://oidc.eks.us-east-1.amazonaws.com/id/ABC123XYZ`
-   - Note the **ID** at the end (after `/id/`)
-
-2. IAM Console → **Identity providers** → **Add provider**
-   - Provider type: **OpenID Connect**
-   - Provider URL: paste the full URL
-   - **Get thumbprint** (auto-fills)
-   - Audience: `sts.amazonaws.com`
-3. **Add provider**
-
-If step 2 fails with AccessDenied → skip to 1.13, annotate service accounts with `LabRole` ARN directly.
-
----
-
-### 1.13 LBC IAM Role (IRSA)
-
-> **AWS Academy:** Skip role creation — use `LabRole` directly. The LBC service account will be annotated with `LabRole` ARN.
-
-```bash
-# AWS Academy: skip IAM role creation — LabRole used directly
-export LBC_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-echo "LBC Role: $LBC_ROLE_ARN"
-```
-
----
-
-### 1.14 Install LBC + Deploy Hello App (Terminal)
+> **AWS Academy:** OIDC provider creation is blocked. Skip LBC entirely — use `Service type=LoadBalancer`. The EKS in-tree cloud provider creates a Classic ELB using the cluster's IAM role (which already has `elasticloadbalancing:*` via `AmazonEKSClusterPolicy`). No OIDC, no Helm, no extra IAM needed.
 
 ```bash
 # Set variables (run these if you opened a new terminal)
 export AWS_REGION=us-east-1
-export CLUSTER_NAME=lks-wallet-eks
+export CLUSTER_NAME=lks-wallet-eks   # use your actual cluster name
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export VPC_ID=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION \
-  --query "cluster.resourcesVpcConfig.vpcId" --output text)
-export LBC_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 
-# Install LBC
-kubectl create serviceaccount aws-load-balancer-controller -n kube-system
-kubectl annotate serviceaccount aws-load-balancer-controller -n kube-system \
-  eks.amazonaws.com/role-arn=$LBC_ROLE_ARN
-
-helm repo add eks https://aws.github.io/eks-charts && helm repo update
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=$CLUSTER_NAME \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set region=$AWS_REGION \
-  --set vpcId=$VPC_ID
-
-kubectl rollout status deployment aws-load-balancer-controller -n kube-system
-# Expected: READY 2/2
+aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
 # Deploy Hello App
 kubectl create namespace wallet
@@ -398,45 +332,23 @@ spec:
     app: wallet-app
   ports:
   - port: 80
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: wallet-ingress
-  namespace: wallet
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
-spec:
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: wallet-api-svc
-            port:
-              number: 80
+  type: LoadBalancer
 EOF
 
 kubectl get pods -n wallet --watch
 # Wait for Running, then Ctrl+C
 
-kubectl get ingress wallet-ingress -n wallet --watch
-# Wait for ADDRESS column, then:
-ALB=$(kubectl get ingress wallet-ingress -n wallet \
+kubectl get svc wallet-api-svc -n wallet --watch
+# Wait for EXTERNAL-IP column (takes 1-2 min), then:
+ELB=$(kubectl get svc wallet-api-svc -n wallet \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl http://$ALB
+curl http://$ELB
 # Expected: nginx welcome page
 ```
 
 **Layer 1 checkpoint:**
 - [ ] `kubectl get nodes` shows Ready
-- [ ] `curl http://$ALB` returns a response
+- [ ] `curl http://$ELB` returns a response
 
 ---
 
@@ -485,9 +397,7 @@ docker buildx build --platform linux/amd64 \
 kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
-# Apply real deployment + service (service.yaml updates selector to app: wallet-api)
-# Keep the Layer 1 wallet-ingress for HTTP testing
-# k8s/ingress.yaml is production HTTPS — apply in Layer 6 after ACM cert setup
+# Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
 sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
 
@@ -579,28 +489,25 @@ Note the endpoint:
 
 ### 3.4 Connect App to RDS (Terminal)
 
+Get the endpoint from Console first:
+1. **RDS Console** → **Databases** → `lks-wallet-db` → **Connectivity & security** → copy the **Endpoint** value
+
 ```bash
-DB_ENDPOINT=$(aws rds describe-db-instances \
-  --db-instance-identifier lks-wallet-db \
-  --query 'DBInstances[0].Endpoint.Address' --output text)
-echo "DB: $DB_ENDPOINT"
+# Paste the endpoint you copied from Console
+DB_ENDPOINT="paste-rds-endpoint-here.rds.amazonaws.com"
 
 sed "s|<RDS_ENDPOINT>|$DB_ENDPOINT|g" k8s/configmap.yaml | kubectl apply -f -
 ```
 
 ### 3.5 Inject DB Password (Terminal)
 
-RDS stored the password in Secrets Manager. Pull it and inject into the deployment. (Layer 5 replaces this with ExternalSecrets.)
+RDS stored the password in Secrets Manager. Pull it from Console:
+1. **RDS Console** → `lks-wallet-db` → **Configuration** tab → copy the **Master credentials ARN** (or find in **Secrets Manager Console** under `rds!db-...`)
+2. **Secrets Manager Console** → click the secret → **Retrieve secret value** → copy the `password` value
 
 ```bash
-DB_SECRET_ARN=$(aws rds describe-db-instances \
-  --db-instance-identifier lks-wallet-db \
-  --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)
-
-DB_PASSWORD=$(aws secretsmanager get-secret-value \
-  --secret-id "$DB_SECRET_ARN" \
-  --query 'SecretString' --output text \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+# Paste the password you retrieved from Secrets Manager Console
+DB_PASSWORD="paste-password-here"
 
 kubectl create secret generic wallet-api-secret \
   --from-literal=DB_PASSWORD="$DB_PASSWORD" \
@@ -719,11 +626,12 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 
 `deployment.yaml` already has the EFS volume mount defined — no patch needed.
 
+Get the EFS File System ID from Console first:
+1. **EFS Console** → click `lks-wallet-storage` → copy the **File system ID** (format: `fs-xxxxxxxxx`)
+
 ```bash
-EFS_ID=$(aws efs describe-file-systems \
-  --query 'FileSystems[?Name==`lks-wallet-storage`].FileSystemId' \
-  --output text)
-echo "EFS: $EFS_ID"
+# Paste the File System ID you copied from EFS Console
+EFS_ID="fs-xxxxxxxxx"
 
 sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/storage-class.yaml | kubectl apply -f -
 kubectl apply -f k8s/pvc.yaml
@@ -932,13 +840,13 @@ kubectl describe pods -n wallet | grep "Image:"
 **Layer 6 checkpoint:**
 - [ ] All 3 GitHub Actions jobs passed (green)
 - [ ] Pod image tag in kubectl matches the git commit SHA
-- [ ] `curl http://$ALB/health/live` returns 200
+- [ ] `curl http://$ELB/health/live` returns 200
 
 ---
 
 ## Cleanup
 
-**Do this in order — Kubernetes resources first to remove the ALB.**
+**Do this in order — Kubernetes resources first to remove the Classic ELB.**
 
 ### Console: EKS → delete node group then cluster
 
@@ -976,7 +884,6 @@ kubectl describe pods -n wallet | grep "Image:"
 
 - `LKS-WalletAppPolicy` (if created)
 - `LKS-EFSCSIPolicy`
-- `AWSLoadBalancerControllerIAMPolicy`
 
 ### Console: NAT Gateway + Elastic IP
 
@@ -1004,7 +911,7 @@ kubectl describe pods -n wallet | grep "Image:"
 Internet
     │ HTTP :80
     ▼
-ALB  (internet-facing, public subnets)
+Classic ELB  (internet-facing, public subnets)
     │
     ▼
 wallet-api pods  (private subnets, m7i-flex.large, AL2023)
@@ -1028,16 +935,15 @@ GitHub Actions (on push to main):
 | Symptom | Cause | Fix |
 |---|---|---|
 | `AccessDenied: iam:CreateRole` | AWS Academy voclabs policy blocks role creation | Use pre-created Lab roles — see section 1.9 |
-| `AccessDenied: iam:CreateOpenIDConnectProvider` | AWS Academy blocks OIDC provider creation | Skip OIDC — annotate service accounts with LabRole ARN directly |
+| `AccessDenied: iam:CreateOpenIDConnectProvider` | AWS Academy blocks OIDC provider creation | Already handled — `Service type=LoadBalancer` used instead; EFS CSI and app SA use LabRole ARN annotation |
 | Node group stuck `CREATING` | Launch template or wrong AMI | Delete, re-create with AL2023 and no launch template |
-| LBC pods not ready after 5 min | LabRole trust policy doesn't include `eks.amazonaws.com` | Check LabRole trust policy — it should allow `ec2.amazonaws.com` at minimum |
-| Ingress has no ADDRESS | Subnet tags missing or wrong cluster name | Verify all 4 subnets have `kubernetes.io/cluster/lks-wallet-eks` tag |
+| Classic ELB not provisioned | Subnet tags missing or wrong cluster name | Verify public subnets have `kubernetes.io/cluster/<cluster-name>` and `kubernetes.io/role/elb=1` tags |
 | `ExternalSecret` not syncing | LabRole can't read Secrets Manager | Check LabRole has `secretsmanager:GetSecretValue` permission |
 | EFS PVC stuck `Pending` | EFS CSI driver not running | Check `kubectl get pods -n kube-system \| grep efs` |
 | GitHub Actions `Unauthorized` to EKS | Access entry missing for LabRole | Run `aws eks create-access-entry` + `associate-access-policy` for LabRole ARN |
 | GitHub Actions credentials expired | Session token expired with lab session | Update `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` secrets |
 | `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
-| ALB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
+| Classic ELB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
 | Pod connection timeout to RDS despite SG rule | Rule allows `lks-eks-node-sg` but pods use the auto-created EKS cluster SG | Add inbound rule for `eks-cluster-sg-lks-wallet-eks-*` SG on port 5432 |
 | App restarts with `DB not ready` even after RDS fix | `DB_PASSWORD` env var missing — app can't auth | Create `wallet-api-secret` from Secrets Manager and patch deployment (see step 3.5) |
 | ECR push fails `tag already exists and cannot be overwritten` | ECR immutable tags enabled | Disable immutability in ECR console or use a new tag version |
