@@ -2,20 +2,22 @@
 
 **Goal**: Deploy a containerized wallet API on EKS, connected to RDS + EFS + Secrets Manager, with a GitHub Actions CI/CD pipeline.  
 **Approach**: Build and test each layer independently before adding the next. Never set up everything at once.  
-**Region**: ap-southeast-1 | **Cost warning**: EKS $0.10/hr, NAT Gateway $0.045/hr — delete after use.
+**Region**: us-east-1 | **Cost warning**: EKS $0.10/hr, NAT Gateway $0.045/hr — delete after use.
 
 ---
 
 ## Layers
 
-| Layer | What You Build | Test |
-|---|---|---|
-| **1** | VPC + IAM + EKS + Nodes (with SSH) + Hello App | Classic ELB serves Hello World |
-| **2** | ECR + Containerized App | Pods pull from ECR |
-| **3** | RDS PostgreSQL | App connects to DB |
-| **4** | EFS Shared Storage | Pods read/write shared files |
-| **5** | Secrets Manager | App reads secrets from AWS |
-| **6** | GitHub Actions CI/CD | `git push` → auto deploy |
+| Layer | What You Build | Test | Script |
+|---|---|---|---|
+| **1** | VPC + IAM + EKS + Nodes + Hello App | Classic ELB serves Hello World | manual (see below) |
+| **2** | ECR + Containerized App | Pods pull from ECR | `scripts/layer2-ecr.sh` |
+| **3** | RDS PostgreSQL | App connects to DB | `scripts/layer3-rds.sh` |
+| **4** | EFS Shared Storage | Pods read/write shared files | `scripts/layer4-efs.sh` |
+| **5** | Secrets Manager | App reads secrets from AWS | `scripts/layer5-secrets.sh` |
+| **6** | GitHub Actions CI/CD | `git push` → auto deploy | manual (see Layer 6) |
+
+> **Scripts** (layers 2–5) are AWS Academy compatible. They use `LabRole` for all addon service accounts. Set `AWS_REGION` and `CLUSTER_NAME` environment variables before running if your values differ from the defaults (`us-east-1`, `lks-wallet-eks`).
 
 ---
 
@@ -388,7 +390,7 @@ kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
 # Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
-sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" k8s/deployment.yaml | kubectl apply -f -
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
 
 # Pods will CrashLoop until Layer 3 provides ConfigMap + Secret — expected
@@ -429,6 +431,8 @@ echo "RDS SG: $RDS_SG | Cluster SG allowed: $CLUSTER_SG"
 
 > **Why two SGs?** EKS auto-creates a cluster SG and attaches it to every node and pod. The manually created `$NODE_SG` covers SSH/remote access but pods actually egress through the cluster SG. Both must be allowed or pods get connection timeout on port 5432.
 
+> **NODE_SG lookup note:** If `lks-eks-node-sg` was never created manually (e.g. node group created via console with "Allow SSH" which creates an `eks-remoteAccess-*` SG instead), the `$NODE_SG` variable will be empty. Use the cluster SG alone, or look up the remoteAccess SG: `aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=eks-remoteAccess*" --query 'SecurityGroups[0].GroupId' --output text`
+
 ### 3.2 Create RDS
 
 ```bash
@@ -441,7 +445,7 @@ aws rds create-db-instance \
   --db-instance-identifier lks-wallet-db \
   --db-instance-class db.t3.micro \
   --engine postgres \
-  --engine-version 16.3 \
+  --engine-version 16.6 \
   --master-username walletadmin \
   --manage-master-user-password \
   --db-name wallet_db \
@@ -471,7 +475,7 @@ sed "s|<RDS_ENDPOINT>|$DB_ENDPOINT|g" k8s/configmap.yaml | kubectl apply -f -
 
 ### 3.4 Inject DB Password
 
-RDS created the password in Secrets Manager. Pull it and create a k8s Secret so the app has `DB_PASSWORD`. (Layer 5 replaces this manual step with ExternalSecrets.)
+RDS auto-creates the password in Secrets Manager as `rds!db-<id>-<uuid>`. Pull it, create a canonical `lks/wallet/db` secret (so ExternalSecret in Layer 5 finds it by name), and create the k8s Secret.
 
 ```bash
 DB_SECRET_ARN=$(aws rds describe-db-instances \
@@ -482,6 +486,15 @@ DB_PASSWORD=$(aws secretsmanager get-secret-value \
   --secret-id "$DB_SECRET_ARN" \
   --query 'SecretString' --output text \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
+
+# Create canonical secret name that ExternalSecret (k8s/external-secret.yaml) references
+aws secretsmanager create-secret \
+  --name lks/wallet/db \
+  --secret-string "{\"password\":\"${DB_PASSWORD}\",\"username\":\"walletadmin\"}" \
+  --tags Key=Project,Value=nusantara-wallet 2>/dev/null || \
+aws secretsmanager put-secret-value \
+  --secret-id lks/wallet/db \
+  --secret-string "{\"password\":\"${DB_PASSWORD}\",\"username\":\"walletadmin\"}"
 
 kubectl create secret generic wallet-api-secret \
   --from-literal=DB_PASSWORD="$DB_PASSWORD" \
@@ -507,22 +520,43 @@ curl http://$ELB/health/ready
 - [ ] Pod logs show `Migration complete` and `Listening on :8080`
 - [ ] `/health/ready` returns 200
 
+> **Note:** If deployment spec includes EFS PVC but Layer 4 hasn't run yet, pod stays `Pending` (`wallet-uploads-pvc not found`). Temporarily patch to `emptyDir` so Layer 3 can be tested independently:
+> ```bash
+> kubectl patch deployment wallet-api -n wallet \
+>   --type=json \
+>   -p='[{"op":"replace","path":"/spec/template/spec/volumes/0","value":{"name":"uploads","emptyDir":{}}}]'
+> # Revert this patch in Layer 4 after EFS PVC is bound.
+> ```
+
 ---
 
 ## Layer 4 — EFS Shared Storage
 
 Multiple pods write payment proof uploads. EFS supports `ReadWriteMany` — EBS does not.
 
-### 4.1 Security Group + EFS
+> **AWS Academy constraints in this layer:**
+> - `elasticfilesystem:CreateAccessPoint` is blocked → use **static PV provisioning** (pre-created PV that references the EFS filesystem directly — no access point, no CSI controller API calls)
+> - `iam:CreateOpenIDConnectProvider` is blocked → install EFS CSI addon **without** `--service-account-role-arn`. Do not pass LabRole ARN either: even with LabRole, the SDK tries `AssumeRoleWithWebIdentity` (OIDC token is mounted in every pod), fails with `No OpenIDConnect provider found`, and never falls back to instance profile
+> - The CSI **node** DaemonSet (which actually mounts EFS via NFS) works fine using the node EC2 instance profile — no IRSA needed
+
+### 4.1 EFS Security Group + File System
 
 ```bash
+# Cluster SG is always attached to pods — more reliable than lks-eks-node-sg
+CLUSTER_SG=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+
 EFS_SG=$(aws ec2 create-security-group \
   --group-name lks-efs-sg \
   --description "EFS mount targets" \
   --vpc-id $VPC_ID \
   --query 'GroupId' --output text)
+
 aws ec2 authorize-security-group-ingress --group-id $EFS_SG \
-  --protocol tcp --port 2049 --source-group $NODE_SG
+  --protocol tcp --port 2049 --source-group $CLUSTER_SG
+# Also allow from lks-eks-node-sg if it exists
+[[ -n "$NODE_SG" ]] && aws ec2 authorize-security-group-ingress --group-id $EFS_SG \
+  --protocol tcp --port 2049 --source-group $NODE_SG 2>/dev/null || true
 aws ec2 create-tags --resources $EFS_SG --tags Key=Name,Value=lks-efs-sg
 
 EFS_ID=$(aws efs create-file-system \
@@ -532,90 +566,90 @@ EFS_ID=$(aws efs create-file-system \
   --query 'FileSystemId' --output text)
 echo "EFS: $EFS_ID"
 
+echo "Waiting for EFS to be ready..."
+sleep 20
+
 aws efs create-mount-target --file-system-id $EFS_ID \
-  --subnet-id $PRIV1 --security-groups $EFS_SG
+  --subnet-id $PRIV1 --security-groups $EFS_SG 2>/dev/null || {
+  sleep 15
+  aws efs create-mount-target --file-system-id $EFS_ID \
+    --subnet-id $PRIV1 --security-groups $EFS_SG
+}
 aws efs create-mount-target --file-system-id $EFS_ID \
   --subnet-id $PRIV2 --security-groups $EFS_SG
 
-echo "Waiting for mount targets..."
-sleep 30
+echo "Waiting for mount targets to be available..."
+sleep 45
 ```
 
 ### 4.2 Install EFS CSI Driver
 
+> **No `--service-account-role-arn`** — installing without it causes the addon to use the node EC2 instance profile for any API calls. Static provisioning avoids API calls from the controller entirely, so this is sufficient.
+
 ```bash
-cat > /tmp/efs-csi-policy.json << 'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": [
-      "elasticfilesystem:DescribeAccessPoints",
-      "elasticfilesystem:DescribeFileSystems",
-      "elasticfilesystem:DescribeMountTargets",
-      "ec2:DescribeAvailabilityZones"
-    ], "Resource": "*"},
-    {"Effect": "Allow", "Action": ["elasticfilesystem:CreateAccessPoint"],
-     "Resource": "*",
-     "Condition": {"StringLike": {"aws:RequestTag/efs.csi.aws.com/cluster": "true"}}},
-    {"Effect": "Allow", "Action": ["elasticfilesystem:TagResource"],
-     "Resource": "*",
-     "Condition": {"StringLike": {"aws:ResourceTag/efs.csi.aws.com/cluster": "true"}}},
-    {"Effect": "Allow", "Action": "elasticfilesystem:DeleteAccessPoint",
-     "Resource": "*",
-     "Condition": {"StringEquals": {"aws:ResourceTag/efs.csi.aws.com/cluster": "true"}}}
-  ]
-}
-EOF
-
-aws iam create-policy --policy-name LKS-EFSCSIPolicy \
-  --policy-document file:///tmp/efs-csi-policy.json
-EFS_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/LKS-EFSCSIPolicy"
-
-# AWS Academy: iam:CreateRole blocked — use LabRole ARN directly
-EFS_CSI_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-
 aws eks create-addon \
   --cluster-name $CLUSTER_NAME \
   --addon-name aws-efs-csi-driver \
-  --service-account-role-arn $EFS_CSI_ROLE_ARN \
   --region $AWS_REGION
 
 aws eks wait addon-active \
   --cluster-name $CLUSTER_NAME --addon-name aws-efs-csi-driver --region $AWS_REGION
 echo "EFS CSI Driver active!"
+
+kubectl get pods -n kube-system | grep efs
+# Expected: efs-csi-controller (2 pods) and efs-csi-node (1 per node) Running
 ```
 
-### 4.3 StorageClass + PVC
+### 4.3 Static PV + PVC
 
-`deployment.yaml` already has the EFS volume mount defined — no patch needed. Just apply StorageClass and PVC.
+Dynamic provisioning calls `efs:CreateAccessPoint` from the CSI controller — blocked in Academy and the controller can't reach IMDS. Static provisioning pre-creates the PV. The CSI node DaemonSet mounts it via NFS — no EFS API calls at all.
 
 ```bash
+# Apply StorageClass (needed as provisioner reference in PV/PVC — parameters ignored for static PVs)
 sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/storage-class.yaml | kubectl apply -f -
+
+# Create static PV pointing directly to the EFS filesystem
+sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/pv.yaml | kubectl apply -f -
+
+# Apply PVC — binds to wallet-uploads-pv by name (no dynamic provisioning triggered)
 kubectl apply -f k8s/pvc.yaml
 
 echo "Waiting for PVC to bind..."
 kubectl wait pvc/wallet-uploads-pvc -n wallet --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 kubectl get pvc -n wallet
-
-kubectl rollout restart deployment/wallet-api -n wallet
-kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
+# Expected: STATUS=Bound  VOLUME=wallet-uploads-pv
 ```
 
-### 4.4 Test Shared Storage
+### 4.4 Restore Deployment + Test
+
+Re-applying the deployment reverts any `emptyDir` patch that was applied in Layer 3.
 
 ```bash
-# Scale to 2 pods to test ReadWriteMany
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
+
+# Verify EFS is mounted
+POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n wallet $POD -- df -h /app/uploads
+# Expected: 127.0.0.1:/ 8.0E 0 8.0E 0% /app/uploads
+
+# Test ReadWriteMany — scale to 2 pods
 kubectl scale deployment wallet-api -n wallet --replicas=2
 kubectl wait --for=condition=ready pod -l app=wallet-api -n wallet --timeout=60s
 
-PODS=($(kubectl get pods -n wallet -l app=wallet-api -o name))
-kubectl exec -n wallet ${PODS[0]} -- sh -c "echo 'hello from pod1' > /app/uploads/test.txt"
-kubectl exec -n wallet ${PODS[1]} -- cat /app/uploads/test.txt
+PODS=$(kubectl get pods -n wallet -l app=wallet-api -o name | sed 's|pod/||')
+P0=$(echo "$PODS" | head -1)
+P1=$(echo "$PODS" | tail -1)
+kubectl exec -n wallet $P0 -- sh -c "echo 'hello from pod1' > /app/uploads/test.txt"
+kubectl exec -n wallet $P1 -- cat /app/uploads/test.txt
 # Expected: hello from pod1
+
+kubectl scale deployment wallet-api -n wallet --replicas=1
 ```
 
 **Layer 4 checkpoint:**
-- [ ] PVC is `Bound`
+- [ ] `kubectl get pvc -n wallet` shows `STATUS=Bound`
+- [ ] `kubectl exec ... df -h /app/uploads` shows `127.0.0.1:/ 8.0E`
 - [ ] File written from pod 1 is readable from pod 2
 
 ---

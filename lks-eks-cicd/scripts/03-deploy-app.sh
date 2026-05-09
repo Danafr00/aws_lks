@@ -83,8 +83,8 @@ kubectl wait pvc/wallet-uploads-pvc -n wallet --for=jsonpath='{.status.phase}'=B
 kubectl get pvc -n wallet
 
 echo ""
-echo "==> Applying Deployment (patching ECR account)"
-sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" "$K8S/deployment.yaml" | kubectl apply -f -
+echo "==> Applying Deployment (patching ECR account and region)"
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$REGION|g" "$K8S/deployment.yaml" | kubectl apply -f -
 
 echo ""
 echo "==> Applying Service, Ingress, HPA, PDB"

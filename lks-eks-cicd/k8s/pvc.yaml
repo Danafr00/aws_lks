@@ -1,4 +1,5 @@
-# ReadWriteMany PVC backed by EFS via the efs-sc StorageClass.
+# ReadWriteMany PVC backed by EFS via static PV (wallet-uploads-pv).
+# Static binding: bypasses CSI controller provisioner (which needs IMDS/IRSA).
 # All wallet-api pods across all nodes can read and write /app/uploads simultaneously.
 # EBS does NOT support ReadWriteMany — that is why EFS is used here.
 apiVersion: v1
@@ -13,6 +14,7 @@ spec:
   accessModes:
     - ReadWriteMany
   storageClassName: efs-sc
+  volumeName: wallet-uploads-pv
   resources:
     requests:
-      storage: 1Gi
+      storage: 5Gi

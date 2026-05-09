@@ -398,7 +398,7 @@ kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
 # Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
-sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" k8s/deployment.yaml | kubectl apply -f -
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
 
 # Pods will CrashLoop until Layer 3 provides ConfigMap + Secret — expected
@@ -451,7 +451,7 @@ kubectl get pods -n wallet
 
 **Engine options:**
 - Engine: **PostgreSQL**
-- Engine version: **PostgreSQL 16.3**
+- Engine version: **PostgreSQL 16.6**
 
 **Templates:** Free tier (or Dev/Test if free tier is not available)
 
@@ -540,9 +540,12 @@ Multiple pods need to share uploaded files. EFS supports `ReadWriteMany` — EBS
    - Name: `lks-efs-sg`
    - Description: `EFS mount targets`
    - VPC: `lks-wallet-vpc`
-2. **Inbound rules** → **Add rule**:
-   - Type: **NFS** | Port: 2049 | Source: **Custom** → `lks-eks-node-sg`
+2. **Inbound rules** → **Add rule** (add **two** rules):
+   - Rule 1: Type: **NFS** | Port: 2049 | Source: **Custom** → search for `eks-cluster-sg-lks-wallet` and select the auto-created cluster SG
+   - Rule 2: Type: **NFS** | Port: 2049 | Source: **Custom** → `lks-eks-node-sg` (if it exists — skip if not found)
 3. **Create security group**
+
+> **Why cluster SG?** EKS attaches the cluster SG to every pod. The CSI node DaemonSet (which does the actual EFS NFS mount) runs with the node's SGs. Using the cluster SG ensures both pods and node agents can reach the EFS mount targets.
 
 ---
 
@@ -576,37 +579,9 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 
 ### 4.3 EFS CSI Driver IAM
 
-> **AWS Academy:** Skip role creation — use `LabRole` for the EFS CSI driver service account.
-
-**Create EFS CSI Policy** (policies are allowed):
-1. IAM Console → **Policies** → **Create policy** → **JSON** tab → paste:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": [
-      "elasticfilesystem:DescribeAccessPoints",
-      "elasticfilesystem:DescribeFileSystems",
-      "elasticfilesystem:DescribeMountTargets",
-      "ec2:DescribeAvailabilityZones"
-    ], "Resource": "*"},
-    {"Effect": "Allow", "Action": ["elasticfilesystem:CreateAccessPoint"],
-     "Resource": "*",
-     "Condition": {"StringLike": {"aws:RequestTag/efs.csi.aws.com/cluster": "true"}}},
-    {"Effect": "Allow", "Action": ["elasticfilesystem:TagResource"],
-     "Resource": "*",
-     "Condition": {"StringLike": {"aws:ResourceTag/efs.csi.aws.com/cluster": "true"}}},
-    {"Effect": "Allow", "Action": "elasticfilesystem:DeleteAccessPoint",
-     "Resource": "*",
-     "Condition": {"StringEquals": {"aws:ResourceTag/efs.csi.aws.com/cluster": "true"}}}
-  ]
-}
-```
-
-2. **Next** → Policy name: `LKS-EFSCSIPolicy` → **Create policy**
-
-> **AWS Academy:** Skip EFS CSI Role creation — annotate the service account with `LabRole` ARN in step 4.4.
+> **AWS Academy:** No IAM setup needed for this layer. We use **static PV provisioning** — the CSI node DaemonSet mounts EFS via NFS directly. The CSI controller (which would need EFS API credentials) is bypassed entirely.
+>
+> Do **not** attach a service account role ARN in the next step. Even attaching `LabRole` causes the SDK to try `AssumeRoleWithWebIdentity` (fails: no OIDC provider in Academy) and never falls back to the instance profile.
 
 ---
 
@@ -615,16 +590,22 @@ Note the **File system ID** (e.g., `fs-0abc123def`)
 1. EKS Console → `lks-wallet-eks` → **Add-ons** tab → **Get more add-ons**
 2. Search for `Amazon EFS CSI Driver` → select it → **Next**
 3. Version: keep default (latest)
-4. IAM role for service account: select **Enter IAM role ARN** → paste `arn:aws:iam::237675846062:role/LabRole`
+4. **IAM role for service account: leave blank** (do not enter any role ARN)
 5. **Next** → **Create**
 
 > ⏳ Wait ~1 minute for Status: **Active**
+
+Verify addon pods are running (terminal):
+```bash
+kubectl get pods -n kube-system | grep efs
+# Expected: efs-csi-controller (2 pods) and efs-csi-node (1 per node) Running
+```
 
 ---
 
 ### 4.5 Mount EFS into Pods (Terminal)
 
-`deployment.yaml` already has the EFS volume mount defined — no patch needed.
+Uses **static PV provisioning** — pre-creates the PersistentVolume pointing to the EFS filesystem directly. The PVC binds to it by name. No dynamic access point creation needed.
 
 Get the EFS File System ID from Console first:
 1. **EFS Console** → click `lks-wallet-storage` → copy the **File system ID** (format: `fs-xxxxxxxxx`)
@@ -633,30 +614,46 @@ Get the EFS File System ID from Console first:
 # Paste the File System ID you copied from EFS Console
 EFS_ID="fs-xxxxxxxxx"
 
+# Apply StorageClass (needed as provisioner reference — parameters ignored for static PVs)
 sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/storage-class.yaml | kubectl apply -f -
+
+# Create static PV pointing directly to the EFS filesystem (no access point)
+sed "s|<EFS_FILE_SYSTEM_ID>|$EFS_ID|g" k8s/pv.yaml | kubectl apply -f -
+
+# Apply PVC — binds to wallet-uploads-pv by name
 kubectl apply -f k8s/pvc.yaml
 
 echo "Waiting for PVC to bind..."
 kubectl wait pvc/wallet-uploads-pvc -n wallet --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 kubectl get pvc -n wallet
+# Expected: STATUS=Bound  VOLUME=wallet-uploads-pv
 
-kubectl rollout restart deployment/wallet-api -n wallet
+# Re-apply deployment (reverts any emptyDir workaround from Layer 3)
+sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
 
-kubectl apply -f k8s/storage-class.yaml
-kubectl rollout status deployment/wallet-api -n wallet
+# Verify EFS is mounted
+POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n wallet $POD -- df -h /app/uploads
+# Expected: 127.0.0.1:/ 8.0E 0 8.0E 0% /app/uploads
 
 # Test ReadWriteMany — scale to 2 pods
 kubectl scale deployment wallet-api -n wallet --replicas=2
 kubectl wait --for=condition=ready pod -l app=wallet-api -n wallet --timeout=60s
 
-PODS=($(kubectl get pods -n wallet -l app=wallet-api -o name))
-kubectl exec -n wallet ${PODS[0]} -- sh -c "echo 'hello from pod1' > /app/uploads/test.txt"
-kubectl exec -n wallet ${PODS[1]} -- cat /app/uploads/test.txt
+PODS=$(kubectl get pods -n wallet -l app=wallet-api -o name | sed 's|pod/||')
+P0=$(echo "$PODS" | head -1)
+P1=$(echo "$PODS" | tail -1)
+kubectl exec -n wallet $P0 -- sh -c "echo 'hello from pod1' > /app/uploads/test.txt"
+kubectl exec -n wallet $P1 -- cat /app/uploads/test.txt
 # Expected: hello from pod1
+
+kubectl scale deployment wallet-api -n wallet --replicas=1
 ```
 
 **Layer 4 checkpoint:**
-- [ ] `kubectl get pvc -n wallet` shows `Bound`
+- [ ] `kubectl get pvc -n wallet` shows `STATUS=Bound`
+- [ ] `kubectl exec ... df -h /app/uploads` shows `127.0.0.1:/ 8.0E`
 - [ ] File written by pod 1 is readable by pod 2
 
 ---
@@ -939,7 +936,8 @@ GitHub Actions (on push to main):
 | Node group stuck `CREATING` | Launch template or wrong AMI | Delete, re-create with AL2023 and no launch template |
 | Classic ELB not provisioned | Subnet tags missing or wrong cluster name | Verify public subnets have `kubernetes.io/cluster/<cluster-name>` and `kubernetes.io/role/elb=1` tags |
 | `ExternalSecret` not syncing | LabRole can't read Secrets Manager | Check LabRole has `secretsmanager:GetSecretValue` permission |
-| EFS PVC stuck `Pending` | EFS CSI driver not running | Check `kubectl get pods -n kube-system \| grep efs` |
+| EFS PVC stuck `Pending` (old error: `ProvisioningFailed`) | Dynamic provisioning requires EFS API calls — `CreateAccessPoint` blocked in Academy or CSI controller can't reach IMDS | Use static PV provisioning: apply `k8s/pv.yaml` with `<EFS_FILE_SYSTEM_ID>` patched, and `k8s/pvc.yaml` with `volumeName: wallet-uploads-pv` |
+| EFS CSI `No OpenIDConnect provider found` | Addon installed with `--service-account-role-arn` (even LabRole) triggers WebIdentity auth which requires OIDC | Delete addon and reinstall without `--service-account-role-arn` |
 | GitHub Actions `Unauthorized` to EKS | Access entry missing for LabRole | Run `aws eks create-access-entry` + `associate-access-policy` for LabRole ARN |
 | GitHub Actions credentials expired | Session token expired with lab session | Update `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` secrets |
 | `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
