@@ -160,7 +160,7 @@ Load processed data into Redshift for BI queries:
   - Database: `pipeline`, Master username: `admin`
   - IAM role: `LabRole` (for S3 COPY access)
   - Publicly accessible: yes
-- Create the `public.orders` table in Redshift with appropriate column types, `DISTKEY(region)`, and `SORTKEY(timestamp)`
+- Create the `public.orders` table in Redshift with appropriate column types, `DISTKEY(region)`, and `SORTKEY(event_ts)`
 - Run a `COPY` command to load Parquet files from S3 processed bucket into `public.orders`
 - Verify with a row count query using the Redshift Data API
 

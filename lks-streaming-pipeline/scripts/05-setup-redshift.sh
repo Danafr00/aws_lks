@@ -74,20 +74,18 @@ STMT_ID=$(aws redshift-data execute-statement \
       product_name    VARCHAR(200),
       category        VARCHAR(100),
       quantity        INTEGER,
-      unit_price      DECIMAL(15,2),
-      total_amount    DECIMAL(15,2),
+      unit_price      DOUBLE PRECISION,
+      total_amount    DOUBLE PRECISION,
       order_status    VARCHAR(50),
       payment_method  VARCHAR(50),
       region          VARCHAR(50),
-      timestamp       TIMESTAMP,
-      processed_at    TIMESTAMP,
-      year            VARCHAR(4),
-      month           VARCHAR(2),
-      day             VARCHAR(2),
+      "timestamp"     VARCHAR(50),
+      processed_at    VARCHAR(50),
+      event_ts        TIMESTAMP,
       PRIMARY KEY (order_id)
     )
     DISTSTYLE KEY DISTKEY(region)
-    SORTKEY(timestamp);
+    SORTKEY(event_ts);
   " \
   --region "$REGION" \
   --query 'Id' \
