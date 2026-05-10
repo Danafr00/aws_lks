@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 RAW_BUCKET="lks-paytech-raw-${ACCOUNT_ID}"
 FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"

@@ -1,17 +1,13 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+LAB_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/LabRole
 PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
 DATA_DIR="$(dirname "$0")/../data"
 
-SM_ROLE_ARN=$(aws iam get-role --role-name LKS-SageMakerRole --query 'Role.Arn' --output text 2>/dev/null || true)
-if [[ -z "$SM_ROLE_ARN" || "$SM_ROLE_ARN" == "None" ]]; then
-  echo "ERROR: LKS-SageMakerRole not found. Run 02-create-iam.sh first."
-  exit 1
-fi
-echo "  Using role: $SM_ROLE_ARN"
+echo "  Using role: $LAB_ROLE_ARN"
 
 echo "==> Uploading training data to S3..."
 aws s3 cp "${DATA_DIR}/train.csv" \
@@ -37,7 +33,7 @@ echo "==> Starting SageMaker training job: $TRAINING_JOB"
 aws sagemaker create-training-job \
   --training-job-name "$TRAINING_JOB" \
   --algorithm-specification "TrainingImage=${IMAGE_URI},TrainingInputMode=File" \
-  --role-arn "$SM_ROLE_ARN" \
+  --role-arn "$LAB_ROLE_ARN" \
   --input-data-config "[
     {\"ChannelName\":\"train\",\"DataSource\":{\"S3DataSource\":{\"S3DataType\":\"S3Prefix\",\"S3Uri\":\"s3://${PROCESSED_BUCKET}/training/train.csv\",\"S3DataDistributionType\":\"FullyReplicated\"}},\"ContentType\":\"text/csv\"},
     {\"ChannelName\":\"validation\",\"DataSource\":{\"S3DataSource\":{\"S3DataType\":\"S3Prefix\",\"S3Uri\":\"s3://${PROCESSED_BUCKET}/training/validation.csv\",\"S3DataDistributionType\":\"FullyReplicated\"}},\"ContentType\":\"text/csv\"}
@@ -80,7 +76,7 @@ MODEL_NAME="lks-paytech-model-$(date +%Y%m%d%H%M%S)"
 aws sagemaker create-model \
   --model-name "$MODEL_NAME" \
   --primary-container "Image=${IMAGE_URI},ModelDataUrl=${MODEL_ARTIFACT}" \
-  --execution-role-arn "$SM_ROLE_ARN" \
+  --execution-role-arn "$LAB_ROLE_ARN" \
   --region "$AWS_REGION"
 
 echo "==> Creating endpoint config..."

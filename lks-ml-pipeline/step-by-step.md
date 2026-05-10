@@ -2,7 +2,8 @@
 
 **Goal**: Build a fraud detection system for PT. Nusantara PayTech — data pipeline feeds SageMaker training, ECS Fargate serves inference 24/7.  
 **Approach**: Build one layer at a time. Verify before moving forward.  
-**Region**: ap-southeast-1 | **Cost warning**: SageMaker endpoint $0.096/hr, Fargate ~$0.02/hr — delete after use.
+**Region**: us-east-1 | **Cost warning**: SageMaker endpoint $0.096/hr, Fargate ~$0.02/hr — delete after use.  
+**IAM**: This module uses the pre-existing `LabRole` for all services. No new IAM roles are created (`iam:CreateRole` is restricted in Vocareum labs).
 
 ---
 
@@ -34,13 +35,14 @@ Amplify (UI) → API Gateway → ALB → ECS Fargate (FastAPI) → SageMaker End
 ## Variables (set once, keep terminal open)
 
 ```bash
-export AWS_REGION=ap-southeast-1
+export AWS_REGION=us-east-1
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export LAB_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/LabRole
 export RAW_BUCKET="lks-paytech-raw-${ACCOUNT_ID}"
 export FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"
 export PROCESSED_BUCKET="lks-paytech-processed-${ACCOUNT_ID}"
 export RESULTS_BUCKET="lks-paytech-results-${ACCOUNT_ID}"
-echo "Account: $ACCOUNT_ID"
+echo "Account: $ACCOUNT_ID | LabRole: $LAB_ROLE_ARN"
 ```
 
 ---
@@ -53,8 +55,7 @@ echo "Account: $ACCOUNT_ID"
 for BUCKET in $RAW_BUCKET $FEATURES_BUCKET $PROCESSED_BUCKET $RESULTS_BUCKET; do
   aws s3api create-bucket \
     --bucket "$BUCKET" \
-    --region $AWS_REGION \
-    --create-bucket-configuration LocationConstraint=$AWS_REGION
+    --region $AWS_REGION
   echo "Created: $BUCKET"
 done
 ```
@@ -100,38 +101,11 @@ aws s3api put-bucket-notification-configuration \
 echo "S3 → SQS notification configured"
 ```
 
-### 1.4 IAM Role for Lambda
+### 1.4 IAM Role (LabRole — no creation needed)
 
 ```bash
-cat > /tmp/lambda-trust.json << 'EOF'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-EOF
-
-aws iam create-role \
-  --role-name LKS-FeatureLambdaRole \
-  --assume-role-policy-document file:///tmp/lambda-trust.json
-
-aws iam put-role-policy \
-  --role-name LKS-FeatureLambdaRole \
-  --policy-name LKS-FeatureLambdaPolicy \
-  --policy-document "{
-    \"Version\":\"2012-10-17\",
-    \"Statement\":[
-      {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],
-       \"Resource\":[\"arn:aws:s3:::${RAW_BUCKET}\",\"arn:aws:s3:::${RAW_BUCKET}/*\"]},
-      {\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",
-       \"Resource\":\"arn:aws:s3:::${FEATURES_BUCKET}/*\"},
-      {\"Effect\":\"Allow\",\"Action\":[\"sqs:ReceiveMessage\",\"sqs:DeleteMessage\",\"sqs:GetQueueAttributes\"],
-       \"Resource\":\"${QUEUE_ARN}\"},
-      {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
-       \"Resource\":\"arn:aws:logs:*:*:*\"}
-    ]
-  }"
-
-LAMBDA_ROLE_ARN=$(aws iam get-role \
-  --role-name LKS-FeatureLambdaRole \
-  --query 'Role.Arn' --output text)
-echo "Lambda Role: $LAMBDA_ROLE_ARN"
+# iam:CreateRole is restricted in this environment. Use the pre-existing LabRole.
+echo "Lambda execution role: $LAB_ROLE_ARN"
 ```
 
 ### 1.5 Deploy Lambda
@@ -145,7 +119,7 @@ aws lambda create-function \
   --function-name lks-feature-trigger \
   --runtime python3.12 \
   --handler handler.handler \
-  --role "$LAMBDA_ROLE_ARN" \
+  --role "$LAB_ROLE_ARN" \
   --zip-file fileb:///tmp/lks-feature-trigger.zip \
   --timeout 300 \
   --memory-size 256 \
@@ -185,35 +159,12 @@ aws s3 ls "s3://${FEATURES_BUCKET}/features/"
 
 ## Layer 2 — Glue ETL + Athena
 
-### 2.1 Glue IAM Role
+### 2.1 IAM Role (LabRole — no creation needed)
 
 ```bash
-cat > /tmp/glue-trust.json << 'EOF'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"glue.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-EOF
+# Use the pre-existing LabRole for Glue.
+echo "Glue job role: $LAB_ROLE_ARN"
 
-aws iam create-role \
-  --role-name LKS-GlueETLRole \
-  --assume-role-policy-document file:///tmp/glue-trust.json
-
-aws iam attach-role-policy \
-  --role-name LKS-GlueETLRole \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
-
-aws iam put-role-policy \
-  --role-name LKS-GlueETLRole \
-  --policy-name LKS-GlueS3Policy \
-  --policy-document "{
-    \"Version\":\"2012-10-17\",
-    \"Statement\":[
-      {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\",\"s3:ListBucket\"],
-       \"Resource\":[\"arn:aws:s3:::${FEATURES_BUCKET}/*\",\"arn:aws:s3:::${PROCESSED_BUCKET}\",\"arn:aws:s3:::${PROCESSED_BUCKET}/*\"]}
-    ]
-  }"
-
-GLUE_ROLE_ARN=$(aws iam get-role --role-name LKS-GlueETLRole --query 'Role.Arn' --output text)
-echo "Glue Role: $GLUE_ROLE_ARN"
-```
 
 ### 2.2 Upload ETL Script + Create Glue Job
 
@@ -225,7 +176,7 @@ aws glue create-database \
 
 aws glue create-job \
   --name lks-etl-paytech \
-  --role "$GLUE_ROLE_ARN" \
+  --role "$LAB_ROLE_ARN" \
   --command "Name=glueetl,ScriptLocation=s3://${PROCESSED_BUCKET}/scripts/etl_job.py,PythonVersion=3" \
   --default-arguments "{
     \"--JOB_NAME\": \"lks-etl-paytech\",
@@ -233,7 +184,7 @@ aws glue create-job \
     \"--S3_OUTPUT_PATH\": \"s3://${PROCESSED_BUCKET}/parquet/\"
   }" \
   --glue-version "4.0" \
-  --worker-type G.025X \
+  --worker-type G.1X \
   --number-of-workers 2
 
 echo "Running Glue ETL job..."
@@ -260,7 +211,7 @@ echo "Glue ETL complete!"
 ```bash
 aws glue create-crawler \
   --name lks-crawler-paytech \
-  --role "$GLUE_ROLE_ARN" \
+  --role "$LAB_ROLE_ARN" \
   --database-name lks_paytech_db \
   --targets "S3Targets=[{Path: \"s3://${PROCESSED_BUCKET}/parquet/\"}]"
 
@@ -295,23 +246,11 @@ aws athena get-query-results --query-execution-id $QUERY_ID \
 
 ## Layer 3 — SageMaker Training + Endpoint
 
-### 3.1 SageMaker IAM Role
+### 3.1 IAM Role (LabRole — no creation needed)
 
 ```bash
-cat > /tmp/sm-trust.json << 'EOF'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"sagemaker.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-EOF
-
-aws iam create-role \
-  --role-name LKS-SageMakerRole \
-  --assume-role-policy-document file:///tmp/sm-trust.json
-
-aws iam attach-role-policy \
-  --role-name LKS-SageMakerRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
-
-SM_ROLE_ARN=$(aws iam get-role --role-name LKS-SageMakerRole --query 'Role.Arn' --output text)
-echo "SageMaker Role: $SM_ROLE_ARN"
+# Use the pre-existing LabRole for SageMaker.
+echo "SageMaker role: $LAB_ROLE_ARN"
 ```
 
 ### 3.2 Upload Training Data + Train
@@ -327,7 +266,7 @@ TRAINING_JOB="lks-paytech-training-$(date +%Y%m%d%H%M%S)"
 aws sagemaker create-training-job \
   --training-job-name "$TRAINING_JOB" \
   --algorithm-specification "TrainingImage=${IMAGE_URI},TrainingInputMode=File" \
-  --role-arn "$SM_ROLE_ARN" \
+  --role-arn "$LAB_ROLE_ARN" \
   --input-data-config "[
     {\"ChannelName\":\"train\",\"DataSource\":{\"S3DataSource\":{\"S3DataType\":\"S3Prefix\",\"S3Uri\":\"s3://${PROCESSED_BUCKET}/training/train.csv\",\"S3DataDistributionType\":\"FullyReplicated\"}},\"ContentType\":\"text/csv\"},
     {\"ChannelName\":\"validation\",\"DataSource\":{\"S3DataSource\":{\"S3DataType\":\"S3Prefix\",\"S3Uri\":\"s3://${PROCESSED_BUCKET}/training/validation.csv\",\"S3DataDistributionType\":\"FullyReplicated\"}},\"ContentType\":\"text/csv\"}
@@ -356,7 +295,7 @@ MODEL_NAME="lks-paytech-model-$(date +%Y%m%d%H%M%S)"
 aws sagemaker create-model \
   --model-name "$MODEL_NAME" \
   --primary-container "Image=${IMAGE_URI},ModelDataUrl=${MODEL_ARTIFACT}" \
-  --execution-role-arn "$SM_ROLE_ARN"
+  --execution-role-arn "$LAB_ROLE_ARN"
 
 aws sagemaker create-endpoint-config \
   --endpoint-config-name "${MODEL_NAME}-config" \
@@ -395,45 +334,11 @@ cat /tmp/sm-output.txt
 
 ## Layer 4 — ECS Fargate + ALB
 
-### 4.1 IAM Roles for ECS
+### 4.1 IAM Roles for ECS (LabRole — no creation needed)
 
 ```bash
-cat > /tmp/ecs-trust.json << 'EOF'
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}
-EOF
-
-aws iam create-role \
-  --role-name LKS-ECSTaskRole \
-  --assume-role-policy-document file:///tmp/ecs-trust.json
-
-aws iam put-role-policy \
-  --role-name LKS-ECSTaskRole \
-  --policy-name LKS-ECSTaskPolicy \
-  --policy-document "{
-    \"Version\":\"2012-10-17\",
-    \"Statement\":[
-      {\"Effect\":\"Allow\",\"Action\":\"sagemaker:InvokeEndpoint\",
-       \"Resource\":\"arn:aws:sagemaker:${AWS_REGION}:${ACCOUNT_ID}:endpoint/lks-paytech-endpoint\"},
-      {\"Effect\":\"Allow\",\"Action\":[\"dynamodb:PutItem\",\"dynamodb:GetItem\"],
-       \"Resource\":\"arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/lks-paytech-predictions\"},
-      {\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",
-       \"Resource\":\"arn:aws:s3:::${RESULTS_BUCKET}/*\"},
-      {\"Effect\":\"Allow\",\"Action\":[\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
-       \"Resource\":\"arn:aws:logs:*:*:*\"}
-    ]
-  }"
-
-aws iam create-role \
-  --role-name LKS-ECSExecutionRole \
-  --assume-role-policy-document file:///tmp/ecs-trust.json
-
-aws iam attach-role-policy \
-  --role-name LKS-ECSExecutionRole \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-
-TASK_ROLE_ARN=$(aws iam get-role --role-name LKS-ECSTaskRole --query 'Role.Arn' --output text)
-EXEC_ROLE_ARN=$(aws iam get-role --role-name LKS-ECSExecutionRole --query 'Role.Arn' --output text)
-echo "Task Role: $TASK_ROLE_ARN"
+# Use the pre-existing LabRole for both ECS task role and execution role.
+echo "ECS task role / execution role: $LAB_ROLE_ARN"
 ```
 
 ### 4.2 Build + Push Docker Image
@@ -471,8 +376,8 @@ aws ecs register-task-definition \
   --network-mode awsvpc \
   --requires-compatibilities FARGATE \
   --cpu 512 --memory 1024 \
-  --task-role-arn "$TASK_ROLE_ARN" \
-  --execution-role-arn "$EXEC_ROLE_ARN" \
+  --task-role-arn "$LAB_ROLE_ARN" \
+  --execution-role-arn "$LAB_ROLE_ARN" \
   --container-definitions "[{
     \"name\": \"inference-api\",
     \"image\": \"${ECR_URI}:latest\",
@@ -754,18 +659,7 @@ done
 # 9. Delete SQS
 aws sqs delete-queue --queue-url "$QUEUE_URL"
 
-# 10. Delete IAM
-for ROLE in LKS-FeatureLambdaRole LKS-GlueETLRole LKS-SageMakerRole LKS-ECSTaskRole LKS-ECSExecutionRole; do
-  for P in $(aws iam list-attached-role-policies --role-name $ROLE \
-    --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null); do
-    aws iam detach-role-policy --role-name $ROLE --policy-arn $P
-  done
-  for P in $(aws iam list-role-policies --role-name $ROLE \
-    --query 'PolicyNames' --output text 2>/dev/null); do
-    aws iam delete-role-policy --role-name $ROLE --policy-name $P
-  done
-  aws iam delete-role --role-name $ROLE 2>/dev/null && echo "Deleted $ROLE"
-done
+# 10. IAM — no custom roles were created; nothing to delete.
 
 echo "All resources deleted"
 ```
@@ -778,7 +672,7 @@ echo "All resources deleted"
 |---|---|---|
 | SQS message not consumed | Lambda SQS trigger not created | Check `aws lambda list-event-source-mappings --function-name lks-feature-trigger` |
 | Lambda KeyError in handler | CSV missing expected column | Verify `sample_transactions.csv` has all required columns |
-| SageMaker endpoint `Failed` | IAM role missing ECR access | Attach `AmazonSageMakerFullAccess` to `LKS-SageMakerRole` |
+| SageMaker endpoint `Failed` | LabRole missing ECR access | Verify `LabRole` has SageMaker and ECR permissions (should be pre-configured in Vocareum lab) |
 | ECS task stops immediately | Missing env var or IAM permission | Check CloudWatch Logs at `/ecs/lks-paytech-task` |
 | ALB health check failing | FastAPI not started yet (cold start) | Wait 30s, then check `/health`; also verify port 8080 in security group |
 | `POST /predict` returns 503 | SageMaker endpoint deleted or throttled | Recreate endpoint with `05-setup-sagemaker.sh` |

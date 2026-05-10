@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 RAW_BUCKET="lks-paytech-raw-${ACCOUNT_ID}"
@@ -15,7 +15,6 @@ for BUCKET in $RAW_BUCKET $FEATURES_BUCKET $PROCESSED_BUCKET $RESULTS_BUCKET; do
   aws s3api create-bucket \
     --bucket "$BUCKET" \
     --region "$AWS_REGION" \
-    --create-bucket-configuration LocationConstraint="$AWS_REGION" \
     2>/dev/null || echo "  $BUCKET already exists, skipping"
   aws s3api put-bucket-versioning \
     --bucket "$BUCKET" \

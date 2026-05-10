@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 API_NAME="lks-paytech-api"
 DYNAMO_TABLE="lks-paytech-predictions"

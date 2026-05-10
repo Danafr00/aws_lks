@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+LAB_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/LabRole
 FEATURES_BUCKET="lks-paytech-features-${ACCOUNT_ID}"
 QUEUE_URL="https://sqs.${AWS_REGION}.amazonaws.com/${ACCOUNT_ID}/lks-paytech-queue"
 QUEUE_ARN="arn:aws:sqs:${AWS_REGION}:${ACCOUNT_ID}:lks-paytech-queue"
-LAMBDA_ROLE_ARN=$(aws iam get-role --role-name LKS-FeatureLambdaRole --query 'Role.Arn' --output text)
 APP_DIR="$(dirname "$0")/../app/feature_lambda"
 
 echo "==> Packaging Lambda..."
@@ -19,7 +19,7 @@ aws lambda create-function \
   --function-name lks-feature-trigger \
   --runtime python3.12 \
   --handler handler.handler \
-  --role "$LAMBDA_ROLE_ARN" \
+  --role "$LAB_ROLE_ARN" \
   --zip-file fileb:///tmp/lks-feature-trigger.zip \
   --timeout 300 \
   --memory-size 256 \

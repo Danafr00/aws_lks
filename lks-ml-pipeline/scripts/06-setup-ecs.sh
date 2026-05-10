@@ -1,11 +1,10 @@
 #!/bin/bash
 set -e
 
-AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+LAB_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/LabRole
 RESULTS_BUCKET="lks-paytech-results-${ACCOUNT_ID}"
-TASK_ROLE_ARN=$(aws iam get-role --role-name LKS-ECSTaskRole --query 'Role.Arn' --output text)
-EXEC_ROLE_ARN=$(aws iam get-role --role-name LKS-ECSExecutionRole --query 'Role.Arn' --output text)
 APP_DIR="$(dirname "$0")/../app/inference_api"
 ECR_REPO="lks-paytech-api"
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
@@ -40,8 +39,8 @@ TASK_DEF=$(cat <<EOF
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
   "memory": "1024",
-  "taskRoleArn": "${TASK_ROLE_ARN}",
-  "executionRoleArn": "${EXEC_ROLE_ARN}",
+  "taskRoleArn": "${LAB_ROLE_ARN}",
+  "executionRoleArn": "${LAB_ROLE_ARN}",
   "containerDefinitions": [{
     "name": "inference-api",
     "image": "${ECR_URI}:latest",
