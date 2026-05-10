@@ -9,6 +9,7 @@
 | **3** | Glue ETL + Glue Crawler + Athena workgroup | Athena query returns rows |
 | **4** | Redshift cluster + table + COPY | Redshift Query Editor shows row count |
 | **5** | CloudWatch alarms + SNS topic | 3 alarms visible in CloudWatch console |
+| **6** | Firehose → Redshift direct (Lambda fan-out) | `public.orders_direct` has rows in Query Editor |
 
 > All steps use **us-east-1 (N. Virginia)** region. Confirm region in the top-right of the console before each step.
 
@@ -279,7 +280,7 @@ ORDER BY revenue DESC;
 | Setting | Value |
 |---|---|
 | Cluster identifier | `lks-pipeline-cluster` |
-| Node type | `ra3.xlplus` |
+| Node type | `ra3.large` |
 | Number of nodes | 1 (single-node) |
 | Database name | `pipeline` |
 | Admin user name | `admin` |
@@ -291,7 +292,7 @@ ORDER BY revenue DESC;
 **Network settings:**
 - Publicly accessible: **Turn on**
 
-> ⚠️ Cost warning: `ra3.xlplus` costs ~$1.08/hr. Delete immediately after exam.
+> ⚠️ Cost warning: `ra3.large` costs ~$0.145/hr. Delete immediately after exam.
 
 2. Click **Create cluster** — wait for status **Available** (~10-15 minutes)
 
@@ -421,6 +422,119 @@ Go to **CloudWatch** → **Alarms** → **Create alarm** (repeat 3 times):
 
 ---
 
+## Layer 6 — Firehose → Redshift Direct
+
+**Concept:** Lambda already enriches records and puts them to `lks-pipeline-firehose` (→ S3). This layer adds a second Firehose that Lambda also sends to — delivering the same enriched JSON directly to Redshift, bypassing Glue ETL. Both Firehoses are **Direct PUT** (Lambda fans out, not Kinesis).
+
+### 6.1 — Create Table in Redshift
+
+1. Go to **Amazon Redshift** → Clusters → `lks-pipeline-cluster` → **Query data** → **Query editor v2**
+2. Connect (Temporary credentials, database `pipeline`, user `admin`)
+3. Run DDL:
+
+```sql
+CREATE TABLE IF NOT EXISTS public.orders_direct (
+    order_id        VARCHAR(50),
+    customer_id     VARCHAR(50),
+    product_id      VARCHAR(50),
+    product_name    VARCHAR(200),
+    category        VARCHAR(100),
+    quantity        INTEGER,
+    unit_price      DOUBLE PRECISION,
+    total_amount    DOUBLE PRECISION,
+    order_status    VARCHAR(50),
+    payment_method  VARCHAR(50),
+    region          VARCHAR(50),
+    "timestamp"     VARCHAR(50),
+    processed_at    VARCHAR(50)
+)
+DISTSTYLE KEY DISTKEY(region)
+SORTKEY("timestamp");
+```
+
+> Includes `processed_at` — Lambda adds it before PutRecord. No `event_ts` — that is derived by Glue ETL only.
+
+### 6.2 — Create Firehose Delivery Stream
+
+1. Go to **Amazon Data Firehose** → **Create Firehose stream**
+
+| Setting | Value |
+|---|---|
+| Source | **Direct PUT** |
+| Destination | **Amazon Redshift** |
+| Firehose stream name | `lks-pipeline-firehose-direct` |
+
+**Destination settings:**
+
+| Setting | Value |
+|---|---|
+| Redshift cluster | `lks-pipeline-cluster` |
+| Database | `pipeline` |
+| Table | `public.orders_direct` |
+| User name | `admin` |
+| Password | `LksPipeline2024!` |
+| Retry duration | 60 seconds |
+
+**COPY command options:**
+
+| Setting | Value |
+|---|---|
+| COPY options | `json 'auto' ACCEPTINVCHARS TRUNCATECOLUMNS` |
+
+**S3 intermediate backup:**
+
+| Setting | Value |
+|---|---|
+| S3 backup bucket | `lks-pipeline-raw-<ACCOUNT_ID>` |
+| S3 backup prefix | `staging/redshift/` |
+| S3 backup error prefix | `errors/redshift/` |
+| Buffer size | 5 MB |
+| Buffer interval | 60 seconds |
+
+**Permissions:**
+- Under **Service role** → select `LabRole`
+
+2. Click **Create Firehose stream** → wait for **Active**
+
+### 6.3 — Activate Direct Path in Lambda
+
+Lambda's `FIREHOSE_DIRECT_STREAM` env var defaults to empty — must be set to activate the second Firehose.
+
+1. Go to **Lambda** → `lks-pipeline-transformer` → **Configuration** → **Environment variables** → **Edit**
+2. Set:
+
+| Key | Value |
+|---|---|
+| `FIREHOSE_DIRECT_STREAM` | `lks-pipeline-firehose-direct` |
+
+3. Click **Save**
+
+### 6.4 — Send Events and Verify
+
+```bash
+python3 app/order_generator.py --stream lks-pipeline-stream --region us-east-1
+```
+
+Wait ~60 seconds, then in Redshift Query Editor v2:
+
+```sql
+-- Row count in direct table (raw streaming)
+SELECT COUNT(*) FROM public.orders_direct;
+
+-- Compare both tables
+SELECT 'orders (Parquet/Glue)' AS source, COUNT(*) AS rows FROM public.orders
+UNION ALL
+SELECT 'orders_direct (Firehose)' AS source, COUNT(*) AS rows FROM public.orders_direct;
+```
+
+**Layer 6 checkpoint:**
+- Firehose `lks-pipeline-firehose-direct` shows **Active**
+- `public.orders_direct` has rows ~60 seconds after sending events
+- `public.orders_direct` has `processed_at` (Lambda-enriched) but no `event_ts` (Glue-only)
+- `public.orders_direct` row count equals events sent (no deduplication unlike `public.orders`)
+
+---
+
 ## Full Validation
 
 Run the validation script to check all layers:
@@ -439,11 +553,12 @@ Delete resources in this order to minimize cost:
 2. **Kinesis** → Data Streams → `lks-pipeline-stream` → Delete
 3. **Lambda** → Functions → `lks-pipeline-transformer` → Actions → Delete
 4. **Firehose** → `lks-pipeline-firehose` → Delete
-5. **Glue** → Jobs → `lks-pipeline-etl` → Delete
-6. **Glue** → Crawlers → `lks-pipeline-crawler` → Delete
-7. **Glue** → Databases → `lks_pipeline_db` → Delete
-8. **Athena** → Workgroups → `lks-pipeline-wg` → Delete (check recursive delete)
-9. **CloudWatch** → Alarms → select all 3 `lks-*` alarms → Delete
-10. **SNS** → Topics → `lks-pipeline-alerts` → Delete
-11. **DynamoDB** → Tables → `lks-pipeline-orders` → Delete
-12. **S3** → empty each bucket (select all → Delete) then delete the bucket
+5. **Firehose** → `lks-pipeline-firehose-direct` → Delete
+6. **Glue** → Jobs → `lks-pipeline-etl` → Delete
+7. **Glue** → Crawlers → `lks-pipeline-crawler` → Delete
+8. **Glue** → Databases → `lks_pipeline_db` → Delete
+9. **Athena** → Workgroups → `lks-pipeline-wg` → Delete (check recursive delete)
+10. **CloudWatch** → Alarms → select all 3 `lks-*` alarms → Delete
+11. **SNS** → Topics → `lks-pipeline-alerts` → Delete
+12. **DynamoDB** → Tables → `lks-pipeline-orders` → Delete
+13. **S3** → empty each bucket (select all → Delete) then delete the bucket

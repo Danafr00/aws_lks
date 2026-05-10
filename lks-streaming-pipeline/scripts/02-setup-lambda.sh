@@ -39,7 +39,7 @@ if echo "$EXISTING" | grep -q '"FunctionName"'; then
   aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
-    --environment "Variables={DYNAMODB_TABLE=${DYNAMO_TABLE},FIREHOSE_STREAM=${FIREHOSE_STREAM},AWS_ACCOUNT_ID=${ACCOUNT_ID}}" \
+    --environment "Variables={DYNAMODB_TABLE=${DYNAMO_TABLE},FIREHOSE_STREAM=${FIREHOSE_STREAM},FIREHOSE_DIRECT_STREAM=,AWS_ACCOUNT_ID=${ACCOUNT_ID}}" \
     --region "$REGION" > /dev/null
 else
   echo "  Creating Lambda function..."
@@ -51,7 +51,7 @@ else
     --zip-file fileb:///tmp/transformer.zip \
     --timeout 60 \
     --memory-size 256 \
-    --environment "Variables={DYNAMODB_TABLE=${DYNAMO_TABLE},FIREHOSE_STREAM=${FIREHOSE_STREAM},AWS_ACCOUNT_ID=${ACCOUNT_ID}}" \
+    --environment "Variables={DYNAMODB_TABLE=${DYNAMO_TABLE},FIREHOSE_STREAM=${FIREHOSE_STREAM},FIREHOSE_DIRECT_STREAM=,AWS_ACCOUNT_ID=${ACCOUNT_ID}}" \
     --region "$REGION" > /dev/null
   echo "  Waiting for Lambda active..."
   aws lambda wait function-active --function-name "$FUNCTION_NAME" --region "$REGION"

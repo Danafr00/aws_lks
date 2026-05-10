@@ -26,7 +26,7 @@ def main():
     for i, order in enumerate(orders, 1):
         client.put_record(
             StreamName=args.stream,
-            Data=json.dumps(order).encode('utf-8'),
+            Data=(json.dumps(order) + '\n').encode('utf-8'),
             PartitionKey=order['order_id']
         )
         print(f"  [{i:02d}/{len(orders)}] Sent {order['order_id']} ({order['region']})")

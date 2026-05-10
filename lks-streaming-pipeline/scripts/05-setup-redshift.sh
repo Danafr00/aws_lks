@@ -28,7 +28,7 @@ else
   echo "  Creating Redshift cluster: ${CLUSTER_ID}"
   aws redshift create-cluster \
     --cluster-identifier "$CLUSTER_ID" \
-    --node-type ra3.xlplus \
+    --node-type ra3.large \
     --master-username "$CLUSTER_USER" \
     --master-user-password "$CLUSTER_PASS" \
     --cluster-type single-node \

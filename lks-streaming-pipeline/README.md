@@ -26,45 +26,65 @@ The engineering team has been asked to build a **decoupled, serverless analytics
 Order Events (CLI)
       │
       ▼
-┌─────────────────────┐
-│  Kinesis Data Stream │  ← real-time ingestion (1 shard)
-└─────────┬───────────┘
-          │  Event Source Mapping
-          ▼
-┌─────────────────────┐     ┌──────────────────────┐
-│  Lambda Transformer  │────▶│  DynamoDB            │
-│  (lks-pipeline-     │     │  (hot store —         │
-│   transformer)      │     │   live order lookups) │
-└─────────┬───────────┘     └──────────────────────┘
-          │  PutRecord
-          ▼
-┌─────────────────────┐
-│  Kinesis Firehose   │  ← buffers 5 MB or 60 sec
-└─────────┬───────────┘
-          │  Batch delivery
-          ▼
-┌─────────────────────┐
-│  S3 Raw Zone        │  ← JSON, partitioned by date
-│  (data lake)        │
-└─────────┬───────────┘
-          │  Glue ETL Job (PySpark)
-          ▼
-┌─────────────────────┐
-│  S3 Processed Zone  │  ← Parquet, partitioned
-└─────────┬───────────┘
-          │  Glue Crawler
-          ▼
-┌─────────────────────┐     ┌──────────────────────┐
-│  Glue Data Catalog  │────▶│  Athena (lakehouse)   │
-└─────────────────────┘     └──────────────────────┘
-                                        │
-┌─────────────────────────────────────┐ │
-│  Redshift Cluster (data warehouse)  │◀┘ COPY from S3
-└─────────────────────────────────────┘
-          │
-          ▼
-CloudWatch Alarms + SNS Alerts
+┌─────────────────────────────────────────────────┐
+│  Kinesis Data Stream (lks-pipeline-stream)       │
+│  1 shard, real-time ingestion                   │
+└──────────────────────┬──────────────────────────┘
+                       │  Event Source Mapping
+                       ▼
+┌─────────────────────────────────────────────────┐
+│  Lambda Transformer (lks-pipeline-transformer)  │
+│  • normalize category  • add processed_at       │
+└────────┬──────────────┬──────────────────────────┘
+         │              │                │
+      PutItem        PutRecord        PutRecord
+         │              │                │
+         ▼              ▼                ▼
+  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐
+  │ DynamoDB │  │   Firehose   │  │    Firehose       │
+  │ hot store│  │ lks-pipeline │  │ lks-pipeline-     │
+  └──────────┘  │ -firehose    │  │ firehose-direct   │
+                └──────┬───────┘  └────────┬──────────┘
+                       │                   │
+                 Batch delivery      S3 staging/redshift/
+                       │             + auto COPY json auto
+                       ▼                   │
+              ┌─────────────────┐          ▼
+              │  S3 Raw Zone    │  ┌────────────────────────┐
+              │  (JSON, dated)  │  │ Redshift               │
+              └────────┬────────┘  │ public.orders_direct   │
+                       │           │ (Lambda-enriched JSON) │
+                  Glue ETL         └────────────────────────┘
+                  (PySpark)
+                       │
+                       ▼
+              ┌─────────────────┐
+              │  S3 Processed   │
+              │  (Parquet)      │
+              └────────┬────────┘
+                       │  Glue Crawler
+                       ▼
+              ┌─────────────────┐     ┌──────────────────────┐
+              │  Glue Catalog   │────▶│  Athena (lakehouse)   │
+              └─────────────────┘     └──────────────────────┘
+                                                 │
+              ┌────────────────────────────────┐ │
+              │ Redshift public.orders         │◀┘ COPY from Parquet
+              │ (Lambda-enriched + Glue ETL)   │
+              └────────────────────────────────┘
+                         │
+                         ▼
+              CloudWatch Alarms + SNS Alerts
 ```
+
+> **Two Redshift tables — what's the difference?**
+> | | `public.orders` | `public.orders_direct` |
+> |---|---|---|
+> | **Source** | S3 Parquet via Glue ETL | S3 JSON via Firehose COPY |
+> | **Lambda enrichment** | ✅ yes (`processed_at`, normalized `category`) | ✅ yes (same) |
+> | **Glue ETL** | ✅ yes (deduped, typed, `event_ts`) | ❌ no |
+> | **`event_ts` column** | ✅ `TIMESTAMP` | ❌ not present |
+> | **Deduplication** | ✅ `dropDuplicates` in PySpark | ❌ no |
 
 ---
 
@@ -155,7 +175,7 @@ GROUP BY region ORDER BY revenue DESC;
 Load processed data into Redshift for BI queries:
 
 - Create a **Redshift provisioned cluster** named `lks-pipeline-cluster`:
-  - Node type: `ra3.xlplus`
+  - Node type: `ra3.large`
   - Type: single-node
   - Database: `pipeline`, Master username: `admin`
   - IAM role: `LabRole` (for S3 COPY access)
@@ -164,7 +184,7 @@ Load processed data into Redshift for BI queries:
 - Run a `COPY` command to load Parquet files from S3 processed bucket into `public.orders`
 - Verify with a row count query using the Redshift Data API
 
-> **Cost warning:** `ra3.xlplus` costs ~$1.08/hr. Delete the cluster immediately after the exam.
+> **Cost warning:** `ra3.large` costs ~$0.145/hr. Delete the cluster immediately after the exam.
 
 **Checkpoint:** `SELECT COUNT(*) FROM public.orders` returns the correct row count via Data API.
 
@@ -184,6 +204,32 @@ Create observability for the pipeline:
 
 ---
 
+### Task 6 — Direct Streaming to Redshift (Bonus, 10 pts)
+
+Demonstrate Kinesis fan-out: a single stream feeding two separate consumers simultaneously.
+
+- Create a second **Kinesis Firehose** named `lks-pipeline-firehose-direct`:
+  - Source: **Kinesis stream** `lks-pipeline-stream` (KinesisStreamAsSource — not Direct PUT)
+  - Destination: Redshift cluster `lks-pipeline-cluster`, database `pipeline`
+  - Target table: `public.orders_direct`
+  - S3 intermediate: `lks-pipeline-raw-<ACCOUNT_ID>/staging/redshift/`
+  - COPY options: `json 'auto' ACCEPTINVCHARS TRUNCATECOLUMNS`
+  - Buffer: 5 MB or 60 seconds
+  - Role: `LabRole`
+- Create table `public.orders_direct` in Redshift:
+  - Raw order fields only — no `processed_at` (Lambda enrichment), no `event_ts` (Glue ETL)
+  - `DISTKEY(region)`, `SORTKEY("timestamp")`
+
+> **Compare the two Redshift tables:**
+> | Table | Source | Enrichment |
+> |---|---|---|
+> | `public.orders` | S3 Parquet via Glue ETL | Lambda + Glue (enriched, deduplicated) |
+> | `public.orders_direct` | Kinesis via Firehose | None — raw JSON as-is |
+
+**Checkpoint:** After sending events and waiting ~60 seconds, `SELECT COUNT(*) FROM public.orders_direct` returns rows.
+
+---
+
 ## Resource Naming Summary
 
 | Resource | Name |
@@ -200,6 +246,7 @@ Create observability for the pipeline:
 | Glue DB | `lks_pipeline_db` |
 | Athena WG | `lks-pipeline-wg` |
 | Redshift Cluster | `lks-pipeline-cluster` |
+| Firehose Direct | `lks-pipeline-firehose-direct` |
 | SNS Topic | `lks-pipeline-alerts` |
 
 ## Required Tags (all resources)
@@ -220,7 +267,7 @@ ManagedBy   = LKS-Team
 | `app/transformer.py` | Lambda handler code |
 | `app/glue_etl.py` | PySpark ETL script |
 | `app/order_generator.py` | CLI tool to send events to Kinesis |
-| `scripts/01-08-*.sh` | Step-by-step setup scripts |
+| `scripts/01-09-*.sh` | Step-by-step setup scripts |
 
 ---
 
@@ -229,7 +276,7 @@ ManagedBy   = LKS-Team
 > Run after the exam to avoid unnecessary charges.
 
 ```bash
-# Redshift (most expensive — ~$1.08/hr)
+# Redshift (most expensive — ~$0.145/hr)
 aws redshift delete-cluster --cluster-identifier lks-pipeline-cluster \
   --skip-final-cluster-snapshot --region us-east-1
 
@@ -239,6 +286,7 @@ aws kinesis delete-stream --stream-name lks-pipeline-stream --region us-east-1
 # Lambda, Firehose, Glue, Athena, CloudWatch, SNS
 aws lambda delete-function --function-name lks-pipeline-transformer --region us-east-1
 aws firehose delete-delivery-stream --delivery-stream-name lks-pipeline-firehose --region us-east-1
+aws firehose delete-delivery-stream --delivery-stream-name lks-pipeline-firehose-direct --region us-east-1
 aws glue delete-job --job-name lks-pipeline-etl --region us-east-1
 aws glue delete-crawler --name lks-pipeline-crawler --region us-east-1
 

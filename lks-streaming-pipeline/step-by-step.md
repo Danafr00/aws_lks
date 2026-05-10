@@ -9,6 +9,7 @@
 | **3** | Glue ETL + Glue Crawler + Athena workgroup | Athena query returns rows |
 | **4** | Redshift cluster + table + COPY | `SELECT COUNT(*) FROM public.orders` returns correct count |
 | **5** | CloudWatch alarms + SNS topic | 3 alarms created |
+| **6** | Firehose → Redshift direct (Lambda fan-out) | `SELECT COUNT(*) FROM public.orders_direct` returns rows |
 
 ---
 
@@ -327,7 +328,7 @@ aws athena get-query-results \
 ```bash
 aws redshift create-cluster \
   --cluster-identifier lks-pipeline-cluster \
-  --node-type ra3.xlplus \
+  --node-type ra3.large \
   --master-username admin \
   --master-user-password 'LksPipeline2024!' \
   --cluster-type single-node \
@@ -519,6 +520,184 @@ aws cloudwatch put-metric-alarm \
 
 ---
 
+## Layer 6 — Firehose → Redshift Direct
+
+**Concept:** Lambda already enriches records and puts them to `lks-pipeline-firehose` (→ S3). This layer adds a second Firehose (`lks-pipeline-firehose-direct`) that Lambda also PutRecords to — delivering the same enriched JSON directly to Redshift, bypassing Glue ETL.
+
+Both Firehoses are **Direct PUT** (Lambda is the fan-out point, not Kinesis).
+
+### 6.1 — Create Table in Redshift
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CLUSTER_ID=lks-pipeline-cluster
+CLUSTER_DB=pipeline
+CLUSTER_USER=admin
+
+STMT_ID=$(aws redshift-data execute-statement \
+  --cluster-identifier "$CLUSTER_ID" \
+  --database "$CLUSTER_DB" \
+  --db-user "$CLUSTER_USER" \
+  --sql "
+    CREATE TABLE IF NOT EXISTS public.orders_direct (
+      order_id        VARCHAR(50),
+      customer_id     VARCHAR(50),
+      product_id      VARCHAR(50),
+      product_name    VARCHAR(200),
+      category        VARCHAR(100),
+      quantity        INTEGER,
+      unit_price      DOUBLE PRECISION,
+      total_amount    DOUBLE PRECISION,
+      order_status    VARCHAR(50),
+      payment_method  VARCHAR(50),
+      region          VARCHAR(50),
+      \"timestamp\"     VARCHAR(50),
+      processed_at    VARCHAR(50)
+    )
+    DISTSTYLE KEY DISTKEY(region)
+    SORTKEY(\"timestamp\");
+  " \
+  --region us-east-1 \
+  --query 'Id' --output text)
+
+aws redshift-data wait statement-finished --id "$STMT_ID" --region us-east-1 2>/dev/null || true
+echo "Table created: public.orders_direct"
+```
+
+> Includes `processed_at` — Lambda adds this before PutRecord to both Firehoses.
+> No `event_ts` — that is derived by Glue ETL only (parses `timestamp` to TimestampType).
+
+### 6.2 — Create Firehose (Direct PUT) + Update Lambda Env Var
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+LAB_ROLE_ARN=arn:aws:iam::${ACCOUNT_ID}:role/LabRole
+RAW_BUCKET=lks-pipeline-raw-${ACCOUNT_ID}
+
+CLUSTER_ENDPOINT=$(aws redshift describe-clusters \
+  --cluster-identifier lks-pipeline-cluster \
+  --region "$REGION" \
+  --query 'Clusters[0].Endpoint.Address' \
+  --output text)
+
+cat > /tmp/lks-fh-rs-config.json << EOF
+{
+  "RoleARN": "${LAB_ROLE_ARN}",
+  "ClusterJDBCURL": "jdbc:redshift://${CLUSTER_ENDPOINT}:5439/pipeline",
+  "CopyCommand": {
+    "DataTableName": "public.orders_direct",
+    "CopyOptions": "json 'auto' ACCEPTINVCHARS TRUNCATECOLUMNS"
+  },
+  "Username": "admin",
+  "Password": "LksPipeline2024!",
+  "S3Configuration": {
+    "RoleARN": "${LAB_ROLE_ARN}",
+    "BucketARN": "arn:aws:s3:::${RAW_BUCKET}",
+    "Prefix": "staging/redshift/",
+    "ErrorOutputPrefix": "errors/redshift/",
+    "BufferingHints": {"SizeInMBs": 5, "IntervalInSeconds": 60},
+    "CompressionFormat": "UNCOMPRESSED"
+  }
+}
+EOF
+
+aws firehose create-delivery-stream \
+  --delivery-stream-name lks-pipeline-firehose-direct \
+  --delivery-stream-type DirectPut \
+  --redshift-destination-configuration "file:///tmp/lks-fh-rs-config.json" \
+  --region "$REGION"
+
+rm -f /tmp/lks-fh-rs-config.json
+```
+
+Wait for ACTIVE:
+
+```bash
+aws firehose describe-delivery-stream \
+  --delivery-stream-name lks-pipeline-firehose-direct \
+  --region us-east-1 \
+  --query 'DeliveryStreamDescription.DeliveryStreamStatus' \
+  --output text
+# Expected: ACTIVE
+```
+
+Activate the direct path in Lambda by setting `FIREHOSE_DIRECT_STREAM`:
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+aws lambda update-function-configuration \
+  --function-name lks-pipeline-transformer \
+  --environment "Variables={
+    DYNAMODB_TABLE=lks-pipeline-orders,
+    FIREHOSE_STREAM=lks-pipeline-firehose,
+    FIREHOSE_DIRECT_STREAM=lks-pipeline-firehose-direct,
+    AWS_ACCOUNT_ID=${ACCOUNT_ID}
+  }" \
+  --region us-east-1
+aws lambda wait function-updated --function-name lks-pipeline-transformer --region us-east-1
+```
+
+> Until this env var is set, Lambda skips the direct Firehose (`FIREHOSE_DIRECT_STREAM` defaults to empty string — the path is a no-op). Script `09-setup-firehose-redshift.sh` does this automatically.
+
+### 6.3 — Send Test Events and Verify
+
+```bash
+# Send 20 orders (records include \n delimiter — required for Firehose json auto COPY)
+python3 app/order_generator.py --stream lks-pipeline-stream --region us-east-1
+```
+
+Wait ~60 seconds (Firehose buffer interval), then query:
+
+```bash
+SID=$(aws redshift-data execute-statement \
+  --cluster-identifier lks-pipeline-cluster \
+  --database pipeline \
+  --db-user admin \
+  --sql "SELECT COUNT(*) FROM public.orders_direct;" \
+  --region us-east-1 \
+  --query 'Id' --output text)
+
+sleep 5
+
+aws redshift-data get-statement-result \
+  --id "$SID" \
+  --region us-east-1 \
+  --query 'Records[0][0]' \
+  --output text
+# Expected: 20 (or more if events were sent multiple times)
+```
+
+Compare both tables:
+
+```bash
+SID=$(aws redshift-data execute-statement \
+  --cluster-identifier lks-pipeline-cluster \
+  --database pipeline \
+  --db-user admin \
+  --sql "
+    SELECT 'orders (Parquet/Glue)' AS source, COUNT(*) AS rows FROM public.orders
+    UNION ALL
+    SELECT 'orders_direct (Firehose)' AS source, COUNT(*) AS rows FROM public.orders_direct;
+  " \
+  --region us-east-1 \
+  --query 'Id' --output text)
+
+sleep 5
+
+aws redshift-data get-statement-result \
+  --id "$SID" \
+  --region us-east-1 \
+  --query 'Records[*][*]' \
+  --output text
+```
+
+**Layer 6 checkpoint — verify before continuing:**
+- [ ] `aws firehose describe-delivery-stream --delivery-stream-name lks-pipeline-firehose-direct` → status `ACTIVE`
+- [ ] `SELECT COUNT(*) FROM public.orders_direct` returns rows after ~60s
+
+---
+
 ## Full Validation
 
 ```bash
@@ -544,6 +723,7 @@ aws lambda delete-function --function-name lks-pipeline-transformer
 
 # Firehose
 aws firehose delete-delivery-stream --delivery-stream-name lks-pipeline-firehose
+aws firehose delete-delivery-stream --delivery-stream-name lks-pipeline-firehose-direct
 
 # Glue
 aws glue delete-job --job-name lks-pipeline-etl

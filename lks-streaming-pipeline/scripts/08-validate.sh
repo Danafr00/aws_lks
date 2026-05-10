@@ -174,6 +174,44 @@ SNS_TOPIC=$(aws sns list-topics \
   && ok "SNS topic exists: ${SNS_TOPIC}" \
   || fail "SNS topic lks-pipeline-alerts not found"
 
+# ── Layer 6: Firehose → Redshift Direct (optional) ───────────────────────────
+echo ""
+echo "--- Layer 6: Firehose → Redshift Direct (bonus) ---"
+
+FIREHOSE_DIRECT_STATUS=$(aws firehose describe-delivery-stream \
+  --delivery-stream-name lks-pipeline-firehose-direct \
+  --region "$REGION" \
+  --query 'DeliveryStreamDescription.DeliveryStreamStatus' \
+  --output text 2>/dev/null || echo "MISSING")
+[ "$FIREHOSE_DIRECT_STATUS" = "ACTIVE" ] \
+  && ok "Firehose direct delivery stream ACTIVE" \
+  || fail "Firehose direct status: ${FIREHOSE_DIRECT_STATUS} (run 09-setup-firehose-redshift.sh)"
+
+# Check orders_direct table exists (requires cluster available)
+if [ "$CLUSTER_STATUS" = "available" ]; then
+  DIRECT_CHECK_ID=$(aws redshift-data execute-statement \
+    --cluster-identifier lks-pipeline-cluster \
+    --database pipeline \
+    --db-user admin \
+    --sql "SELECT COUNT(*) FROM public.orders_direct;" \
+    --region "$REGION" \
+    --query 'Id' --output text 2>/dev/null || echo "")
+  if [ -n "$DIRECT_CHECK_ID" ]; then
+    sleep 5
+    DIRECT_COUNT=$(aws redshift-data get-statement-result \
+      --id "$DIRECT_CHECK_ID" \
+      --region "$REGION" \
+      --query 'Records[0][0]' --output text 2>/dev/null || echo "0")
+    [ "$DIRECT_COUNT" -ge 1 ] \
+      && ok "Redshift public.orders_direct has ${DIRECT_COUNT} rows" \
+      || fail "Redshift public.orders_direct has 0 rows — send events then wait ~60s"
+  else
+    fail "Could not query public.orders_direct — table may not exist (run 09-setup-firehose-redshift.sh)"
+  fi
+else
+  fail "Redshift cluster not available — skip Layer 6 check"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"

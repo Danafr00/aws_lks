@@ -9,6 +9,7 @@ firehose = boto3.client('firehose', region_name=os.environ.get('AWS_REGION', 'us
 
 TABLE_NAME = os.environ['DYNAMODB_TABLE']
 FIREHOSE_STREAM = os.environ['FIREHOSE_STREAM']
+FIREHOSE_DIRECT_STREAM = os.environ.get('FIREHOSE_DIRECT_STREAM', '')
 
 table = dynamodb.Table(TABLE_NAME)
 
@@ -28,10 +29,16 @@ def handler(event, context):
 
             table.put_item(Item=order)
 
+            encoded = (json.dumps(order) + '\n').encode('utf-8')
             firehose.put_record(
                 DeliveryStreamName=FIREHOSE_STREAM,
-                Record={'Data': (json.dumps(order) + '\n').encode('utf-8')}
+                Record={'Data': encoded}
             )
+            if FIREHOSE_DIRECT_STREAM:
+                firehose.put_record(
+                    DeliveryStreamName=FIREHOSE_DIRECT_STREAM,
+                    Record={'Data': encoded}
+                )
 
         except Exception as e:
             print(f"ERROR seq={seq}: {e}")
