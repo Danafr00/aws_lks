@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NusantaraShop</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #f0f4f8; color: #333; }
+    header { background: linear-gradient(135deg, #1a56db, #6875f5); color: white; padding: 20px 40px; display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 1.6rem; }
+    .badge { background: rgba(255,255,255,0.2); border-radius: 999px; padding: 4px 12px; font-size: 0.8rem; }
+    main { max-width: 1100px; margin: 32px auto; padding: 0 20px; }
+    .status-bar { background: white; border-radius: 12px; padding: 16px 24px; margin-bottom: 24px; display: flex; gap: 24px; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+    .status-item { display: flex; flex-direction: column; gap: 4px; }
+    .status-label { font-size: 0.75rem; color: #777; text-transform: uppercase; letter-spacing: .05em; }
+    .status-value { font-weight: 600; font-size: 0.95rem; }
+    .status-ok { color: #0f9b58; }
+    .status-err { color: #e02424; }
+    .controls { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+    button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 500; transition: all .15s; }
+    .btn-primary { background: #1a56db; color: white; }
+    .btn-primary:hover { background: #1e3a8a; }
+    .btn-secondary { background: white; color: #374151; border: 1px solid #d1d5db; }
+    .btn-secondary:hover { background: #f9fafb; }
+    .btn-danger { background: #e02424; color: white; }
+    .btn-danger:hover { background: #9b1c1c; }
+    select { padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 0.9rem; background: white; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+    .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.06); border: 1px solid #e5e7eb; transition: transform .15s, box-shadow .15s; }
+    .card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.1); }
+    .card-name { font-size: 1rem; font-weight: 600; margin-bottom: 8px; }
+    .card-cat { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+    .card-price { font-size: 1.1rem; font-weight: 700; color: #1a56db; }
+    .card-stock { font-size: 0.8rem; color: #6b7280; margin-top: 6px; }
+    .source-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
+    .source-cache { background: #d1fae5; color: #065f46; }
+    .source-db { background: #dbeafe; color: #1e40af; }
+    #loading { text-align: center; padding: 40px; color: #6b7280; }
+    #error { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; color: #991b1b; margin-bottom: 16px; display: none; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>NusantaraShop</h1>
+  <span class="badge" id="version-badge">v?.?.?</span>
+  <span class="badge" id="color-badge">●</span>
+</header>
+<main>
+  <div class="status-bar">
+    <div class="status-item">
+      <span class="status-label">API</span>
+      <span class="status-value" id="api-status">checking...</span>
+    </div>
+    <div class="status-item">
+      <span class="status-label">Redis Cache</span>
+      <span class="status-value" id="redis-status">checking...</span>
+    </div>
+    <div class="status-item">
+      <span class="status-label">Last Source</span>
+      <span class="status-value" id="last-source">-</span>
+    </div>
+  </div>
+  <div id="error"></div>
+  <div class="controls">
+    <select id="category-filter">
+      <option value="">All Categories</option>
+      <option value="electronics">Electronics</option>
+      <option value="furniture">Furniture</option>
+      <option value="kitchen">Kitchen</option>
+    </select>
+    <button class="btn-primary" onclick="loadProducts()">Load Products</button>
+    <button class="btn-danger" onclick="clearCache()">Clear Cache</button>
+  </div>
+  <div id="loading">Click "Load Products" to begin.</div>
+  <div class="grid" id="product-grid"></div>
+</main>
+<script>
+  const API = '';
+
+  async function checkHealth() {
+    try {
+      const r = await fetch(API + '/health');
+      const d = await r.json();
+      document.getElementById('api-status').textContent = d.status;
+      document.getElementById('api-status').className = 'status-value status-ok';
+      document.getElementById('redis-status').textContent = d.redis;
+      document.getElementById('redis-status').className = 'status-value ' + (d.redis === 'connected' ? 'status-ok' : 'status-err');
+      document.getElementById('version-badge').textContent = 'v' + d.version;
+      const colorBadge = document.getElementById('color-badge');
+      colorBadge.textContent = '● ' + d.color;
+      colorBadge.style.background = d.color === 'blue' ? 'rgba(59,130,246,.4)' : 'rgba(34,197,94,.4)';
+    } catch(e) {
+      document.getElementById('api-status').textContent = 'error';
+      document.getElementById('api-status').className = 'status-value status-err';
+    }
+  }
+
+  async function loadProducts() {
+    const cat = document.getElementById('category-filter').value;
+    const url = API + '/products' + (cat ? '?category=' + cat : '');
+    document.getElementById('loading').style.display = 'block';
+    document.getElementById('product-grid').innerHTML = '';
+    document.getElementById('error').style.display = 'none';
+    try {
+      const r = await fetch(url);
+      const d = await r.json();
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('last-source').textContent = d.source;
+      document.getElementById('last-source').className = 'status-value ' + (d.source === 'cache' ? 'status-ok' : '');
+      const grid = document.getElementById('product-grid');
+      d.data.forEach(p => {
+        grid.innerHTML += `
+          <div class="card">
+            <div class="card-name">${p.name} <span class="source-tag source-${d.source}">${d.source}</span></div>
+            <div class="card-cat">${p.category}</div>
+            <div class="card-price">Rp ${p.price.toLocaleString('id-ID')}</div>
+            <div class="card-stock">Stock: ${p.stock} units</div>
+          </div>`;
+      });
+    } catch(e) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('error').textContent = 'Failed to load products: ' + e.message;
+      document.getElementById('error').style.display = 'block';
+    }
+  }
+
+  async function clearCache() {
+    try {
+      await fetch(API + '/cache/clear', { method: 'POST' });
+      alert('Cache cleared!');
+    } catch(e) {
+      alert('Failed: ' + e.message);
+    }
+  }
+
+  checkHealth();
+  setInterval(checkHealth, 10000);
+</script>
+</body>
+</html>
