@@ -7,7 +7,8 @@ REDIS_ENDPOINT="${redis_endpoint}"
 S3_BUCKET="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 PROJECT_NAME="${project_name}"
-APP_PORT=8080
+APP_PORT=8000   # gunicorn internal port
+NGINX_PORT=8080 # what ALB targets
 
 # ─── System update & packages ─────────────────────────────────────────────────
 yum update -y
@@ -35,11 +36,15 @@ pip3 install flask flask-sqlalchemy pymysql redis boto3 gunicorn
 # ─── Write environment config ─────────────────────────────────────────────────
 cat > /opt/app/.env << EOF
 DATABASE_URL=mysql+pymysql://$DB_USER:$DB_PASS@$DB_HOST:3306/$DB_NAME
-REDIS_URL=redis://$REDIS_ENDPOINT:6379/0
 S3_BUCKET=$S3_BUCKET
 AWS_REGION=$AWS_REGION
 PORT=$APP_PORT
 EOF
+
+# Only write REDIS_URL if an endpoint was provided (ElastiCache enabled)
+if [ -n "$REDIS_ENDPOINT" ]; then
+  echo "REDIS_URL=redis://$REDIS_ENDPOINT:6379/0" >> /opt/app/.env
+fi
 
 # ─── Write Flask application ───────────────────────────────────────────────────
 cat > /opt/app/app.py << 'APPEOF'
@@ -198,7 +203,7 @@ User=nobody
 Group=nobody
 WorkingDirectory=/opt/app
 EnvironmentFile=/opt/app/.env
-ExecStart=/usr/local/bin/gunicorn --workers 4 --bind 0.0.0.0:$APP_PORT --access-logfile - --error-logfile - app:app
+ExecStart=/usr/local/bin/gunicorn --workers 4 --bind 127.0.0.1:$APP_PORT --access-logfile - --error-logfile - app:app
 Restart=always
 RestartSec=5
 
@@ -213,7 +218,7 @@ systemctl start  lksapp
 # ─── Nginx as reverse proxy ───────────────────────────────────────────────────
 cat > /etc/nginx/conf.d/lksapp.conf << EOF
 server {
-    listen 8080;
+    listen $NGINX_PORT;
     server_name _;
 
     location /health {

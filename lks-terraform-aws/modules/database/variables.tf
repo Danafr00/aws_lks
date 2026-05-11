@@ -40,7 +40,8 @@ variable "db_max_allocated_storage" {
 }
 
 variable "db_backup_retention_period" {
-  type = number
+  type    = number
+  default = 0
 }
 
 # null = use AWS-managed key (free); ARN = use CMK
@@ -69,6 +70,18 @@ variable "enable_deletion_protection" {
 variable "enable_multi_az" {
   type    = bool
   default = false
+}
+
+# Pin RDS to a specific AZ. Empty string = AWS picks. Set to first AZ for free tier.
+variable "db_availability_zone" {
+  type    = string
+  default = ""
+}
+
+# For learning: true lets you connect directly from your machine (needs public subnet + SG open)
+variable "rds_publicly_accessible" {
+  type    = bool
+  default = true
 }
 
 # FREE TIER: false

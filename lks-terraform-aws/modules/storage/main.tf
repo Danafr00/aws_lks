@@ -169,7 +169,8 @@ resource "aws_cloudfront_distribution" "main" {
   default_root_object = "index.html"
   price_class         = "PriceClass_200" # Use edge locations in Asia + NA + EU
 
-  aliases = var.domain_name != "" ? ["cdn.${var.domain_name}"] : []
+  # Aliases require a custom ACM cert. Only set when cert ARN is provided.
+  aliases = var.cloudfront_certificate_arn != "" && var.domain_name != "" ? ["cdn.${var.domain_name}"] : []
 
   # S3 origin for static assets
   origin {
@@ -215,8 +216,10 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = var.domain_name == "" ? true : false
-    minimum_protocol_version       = "TLSv1.2_2021"
+    cloudfront_default_certificate = var.cloudfront_certificate_arn == "" ? true : false
+    acm_certificate_arn            = var.cloudfront_certificate_arn != "" ? var.cloudfront_certificate_arn : null
+    ssl_support_method             = var.cloudfront_certificate_arn != "" ? "sni-only" : null
+    minimum_protocol_version       = var.cloudfront_certificate_arn != "" ? "TLSv1.2_2021" : "TLSv1"
   }
 
   logging_config {

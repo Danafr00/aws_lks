@@ -93,7 +93,8 @@ resource "aws_db_instance" "main" {
   parameter_group_name   = aws_db_parameter_group.main.name
 
   # FREE TIER: false | PAID HA: true
-  multi_az = var.enable_multi_az
+  multi_az          = var.enable_multi_az
+  availability_zone = var.enable_multi_az ? null : (var.db_availability_zone != "" ? var.db_availability_zone : null)
 
   backup_retention_period = var.db_backup_retention_period
   backup_window           = "03:00-04:00"
@@ -108,11 +109,11 @@ resource "aws_db_instance" "main" {
   performance_insights_retention_period = 7
 
   deletion_protection       = var.enable_deletion_protection
-  skip_final_snapshot       = true # FREE TIER: skip snapshot on destroy to avoid storage cost
+  skip_final_snapshot       = true
   copy_tags_to_snapshot     = true
 
   auto_minor_version_upgrade = true
-  publicly_accessible        = false
+  publicly_accessible        = var.rds_publicly_accessible
 
   tags = { Name = "${var.name_prefix}-mysql" }
 }

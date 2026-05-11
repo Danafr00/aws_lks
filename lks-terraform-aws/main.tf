@@ -49,8 +49,9 @@ module "security" {
   vpc_id         = module.vpc.vpc_id
   account_id     = local.account_id
   aws_region     = var.aws_region
-  enable_waf     = var.enable_waf
-  enable_kms_cmk = var.enable_kms_cmk
+  enable_waf       = var.enable_waf
+  enable_kms_cmk   = var.enable_kms_cmk
+  rds_open_ingress = var.rds_open_ingress
 }
 
 module "storage" {
@@ -58,8 +59,9 @@ module "storage" {
 
   name_prefix = local.name_prefix
   suffix      = local.suffix
-  kms_key_arn = module.security.kms_key_arn # null when enable_kms_cmk = false
-  domain_name = var.domain_name
+  kms_key_arn                = module.security.kms_key_arn # null when enable_kms_cmk = false
+  domain_name                = var.domain_name
+  cloudfront_certificate_arn = var.cloudfront_certificate_arn
 }
 
 module "database" {
@@ -70,6 +72,8 @@ module "database" {
   db_subnet_ids              = module.vpc.db_subnet_ids
   rds_sg_id                  = module.security.rds_sg_id
   redis_sg_id                = module.security.redis_sg_id
+  db_availability_zone       = var.db_availability_zone
+  rds_publicly_accessible    = var.rds_publicly_accessible
   db_instance_class          = var.db_instance_class
   db_name                    = var.db_name
   db_username                = var.db_username
@@ -113,7 +117,9 @@ module "compute" {
   ec2_sg_id             = module.security.ec2_sg_id
   bastion_sg_id         = module.security.bastion_sg_id
   instance_profile_name = module.security.ec2_instance_profile_name
-  alb_target_group_arn  = module.alb.target_group_arn
+  alb_target_group_arn    = module.alb.target_group_arn
+  alb_arn_suffix          = module.alb.alb_arn_suffix
+  target_group_arn_suffix = module.alb.target_group_arn_suffix
   min_capacity          = var.min_capacity
   max_capacity          = var.max_capacity
   desired_capacity      = var.desired_capacity

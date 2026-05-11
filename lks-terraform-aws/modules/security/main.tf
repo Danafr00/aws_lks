@@ -117,7 +117,7 @@ resource "aws_security_group" "ec2" {
   tags = { Name = "${var.name_prefix}-sg-ec2" }
 }
 
-# RDS – only from app servers + bastion
+# RDS – from app servers + bastion; open to 0.0.0.0/0 when rds_open_ingress = true (learning only)
 resource "aws_security_group" "rds" {
   name        = "${var.name_prefix}-sg-rds"
   description = "Allow MySQL from app servers and bastion"
@@ -137,6 +137,17 @@ resource "aws_security_group" "rds" {
     to_port         = 3306
     protocol        = "tcp"
     security_groups = [aws_security_group.bastion.id]
+  }
+
+  dynamic "ingress" {
+    for_each = var.rds_open_ingress ? [1] : []
+    content {
+      description = "MySQL open (learning only)"
+      from_port   = 3306
+      to_port     = 3306
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {

@@ -13,7 +13,7 @@ variable "project_name" {
 variable "environment" {
   description = "Environment name (development / staging / production)"
   type        = string
-  default     = "production"
+  default     = "development"
 
   validation {
     condition     = contains(["development", "staging", "production"], var.environment)
@@ -52,39 +52,36 @@ variable "db_subnet_cidrs" {
   default     = ["10.0.21.0/24", "10.0.22.0/24"]
 }
 
-# single_nat_gateway = true  → 1 NAT GW (saves ~$32/month, FREE TIER recommended)
-# single_nat_gateway = false → 1 NAT GW per AZ (HA, but NOT free tier)
+# 1 NAT GW ~$32/month. false = 1 per AZ ~$65/month (HA, not needed for learning)
 variable "single_nat_gateway" {
-  description = "Use a single shared NAT Gateway. Saves ~$32/month; set false for full HA."
+  description = "Use a single shared NAT Gateway."
   type        = bool
-  default     = true # FREE TIER
+  default     = true
 }
 
 # ─── Compute ──────────────────────────────────────────────────────────────────
-# t2.micro = FREE TIER (750 hrs/month for 12 months)
 variable "instance_type" {
   description = "EC2 instance type for application servers (t2.micro = free tier)"
   type        = string
-  default     = "t2.micro" # FREE TIER
+  default     = "t2.micro"
 }
 
 variable "bastion_instance_type" {
-  description = "EC2 instance type for bastion host (t2.micro = free tier)"
+  description = "EC2 instance type for bastion host"
   type        = string
-  default     = "t2.micro" # FREE TIER
+  default     = "t2.micro"
 }
 
 variable "key_pair_name" {
-  description = "Name of an existing EC2 key pair for SSH access"
+  description = "Name of an existing EC2 key pair for SSH access (leave empty to skip)"
   type        = string
   default     = ""
 }
 
-# Keep at 1 for free tier (750 hrs/month covers exactly 1 t2.micro)
 variable "min_capacity" {
   description = "Minimum number of app instances in the Auto Scaling Group"
   type        = number
-  default     = 1 # FREE TIER
+  default     = 1
 }
 
 variable "max_capacity" {
@@ -96,15 +93,14 @@ variable "max_capacity" {
 variable "desired_capacity" {
   description = "Desired number of app instances in the Auto Scaling Group"
   type        = number
-  default     = 1 # FREE TIER
+  default     = 1
 }
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-# db.t3.micro = FREE TIER (750 hrs/month for 12 months)
 variable "db_instance_class" {
   description = "RDS instance class (db.t3.micro = free tier)"
   type        = string
-  default     = "db.t3.micro" # FREE TIER
+  default     = "db.t3.micro"
 }
 
 variable "db_name" {
@@ -120,50 +116,67 @@ variable "db_username" {
   sensitive   = true
 }
 
-# 20 GB = FREE TIER limit
 variable "db_allocated_storage" {
   description = "Allocated storage for RDS (GB). Free tier max = 20 GB."
   type        = number
-  default     = 20 # FREE TIER
+  default     = 20
 }
 
 variable "db_max_allocated_storage" {
-  description = "Maximum auto-scaled storage for RDS (GB)"
+  description = "Maximum auto-scaled storage for RDS (GB). Equal to allocated = disable autoscaling."
   type        = number
-  default     = 20 # Set equal to allocated to disable autoscaling on free tier
+  default     = 20
 }
 
 variable "db_backup_retention_period" {
-  description = "Number of days to retain automated RDS backups (0 = disabled)"
+  description = "Days to retain automated RDS backups (0 = disabled, faster for learning)"
   type        = number
-  default     = 1
+  default     = 0
 }
 
-# enable_multi_az = false → FREE TIER (single AZ)
-# enable_multi_az = true  → NOT free tier (doubles RDS cost)
+variable "db_availability_zone" {
+  description = "AZ to pin RDS instance (single-AZ only). Empty = AWS picks."
+  type        = string
+  default     = "ap-southeast-1a"
+}
+
+# Open SG port 3306 to 0.0.0.0/0 so students can connect with any MySQL client
+variable "rds_open_ingress" {
+  description = "Open RDS SG port 3306 to 0.0.0.0/0. For learning only."
+  type        = bool
+  default     = true
+}
+
+# Needs public subnet to actually be reachable; set true when testing direct DB access
+variable "rds_publicly_accessible" {
+  description = "Set RDS publicly_accessible = true. For learning only."
+  type        = bool
+  default     = true
+}
+
+# false = single AZ (learning default). true = Multi-AZ HA (doubles cost)
 variable "enable_multi_az" {
   description = "Enable RDS Multi-AZ. NOT free tier – doubles RDS cost."
   type        = bool
-  default     = false # FREE TIER
+  default     = false
 }
 
-# enable_read_replica = false → FREE TIER
 variable "enable_read_replica" {
   description = "Create an RDS read replica. NOT free tier."
   type        = bool
-  default     = false # FREE TIER
+  default     = false
 }
 
 # ─── Cache ────────────────────────────────────────────────────────────────────
-# ElastiCache is NOT in AWS Free Tier at all
+# ElastiCache is NOT in AWS Free Tier at all (~$12+/month)
 variable "enable_elasticache" {
-  description = "Enable ElastiCache Redis. NOT free tier – costs ~$12+/month."
+  description = "Enable ElastiCache Redis. NOT free tier."
   type        = bool
-  default     = false # FREE TIER
+  default     = false
 }
 
 variable "redis_node_type" {
-  description = "ElastiCache Redis node type (only used when enable_elasticache = true)"
+  description = "ElastiCache Redis node type"
   type        = string
   default     = "cache.t3.micro"
 }
@@ -175,31 +188,37 @@ variable "redis_num_shards" {
 }
 
 variable "redis_replicas_per_shard" {
-  description = "Number of replica nodes per shard"
+  description = "Number of replica nodes per shard (0 = no replica)"
   type        = number
-  default     = 0 # 0 = no replica on free tier
+  default     = 0
 }
 
 # ─── WAF ──────────────────────────────────────────────────────────────────────
-# WAF costs $5/WebACL/month + $1/million requests – NOT free tier
+# ~$5/WebACL/month + $1/million requests
 variable "enable_waf" {
-  description = "Enable WAF Web ACL. NOT free tier – costs ~$5+/month."
+  description = "Enable WAF Web ACL. NOT free tier."
   type        = bool
-  default     = false # FREE TIER
+  default     = false
 }
 
 # ─── KMS ──────────────────────────────────────────────────────────────────────
-# KMS CMK costs $1/key/month – NOT free tier
-# When false, resources use AWS-managed encryption keys (free)
+# $1/key/month. When false, uses AWS-managed keys (free, still encrypted)
 variable "enable_kms_cmk" {
   description = "Create a KMS Customer Managed Key. NOT free tier – costs $1/month."
   type        = bool
-  default     = false # FREE TIER
+  default     = false
 }
 
 # ─── Domain / SSL ─────────────────────────────────────────────────────────────
 variable "domain_name" {
-  description = "Custom domain name (leave empty to skip ACM/HTTPS setup)"
+  description = "Custom domain name (leave empty to use ALB DNS directly)"
+  type        = string
+  default     = ""
+}
+
+# CloudFront requires ACM certs in us-east-1. Create manually then paste ARN here.
+variable "cloudfront_certificate_arn" {
+  description = "ACM certificate ARN (us-east-1) for CloudFront custom domain."
   type        = string
   default     = ""
 }
@@ -211,9 +230,10 @@ variable "alert_email" {
   default     = "admin@example.com"
 }
 
-# ─── Misc ─────────────────────────────────────────────────────────────────────
+# ─── Safety ───────────────────────────────────────────────────────────────────
+# Keep false so terraform destroy works cleanly during learning
 variable "enable_deletion_protection" {
   description = "Enable deletion protection on ALB and RDS"
   type        = bool
-  default     = false # FREE TIER – keep false so terraform destroy works cleanly
+  default     = false
 }

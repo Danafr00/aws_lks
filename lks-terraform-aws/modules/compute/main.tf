@@ -21,10 +21,7 @@ resource "aws_launch_template" "app" {
     name = var.instance_profile_name
   }
 
-  dynamic "key_name" {
-    for_each = var.key_pair_name != "" ? [var.key_pair_name] : []
-    content {}
-  }
+  key_name = var.key_pair_name != "" ? var.key_pair_name : null
 
   # Encrypted root volume
   block_device_mappings {
@@ -123,7 +120,7 @@ resource "aws_autoscaling_policy" "request_count_tracking" {
   target_tracking_configuration {
     predefined_metric_specification {
       predefined_metric_type = "ALBRequestCountPerTarget"
-      resource_label         = "${var.name_prefix}-app-server"
+      resource_label         = "${var.alb_arn_suffix}/${var.target_group_arn_suffix}"
     }
     target_value = 1000.0
   }

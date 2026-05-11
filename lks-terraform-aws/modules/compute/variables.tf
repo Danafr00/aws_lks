@@ -46,6 +46,14 @@ variable "alb_target_group_arn" {
   type = string
 }
 
+variable "alb_arn_suffix" {
+  type = string
+}
+
+variable "target_group_arn_suffix" {
+  type = string
+}
+
 variable "min_capacity" {
   type = number
 }
@@ -63,7 +71,8 @@ variable "db_secret_arn" {
 }
 
 variable "redis_endpoint" {
-  type = string
+  type    = string
+  default = null
 }
 
 variable "s3_bucket_name" {

@@ -18,6 +18,12 @@ variable "aws_region" {
   type = string
 }
 
+variable "rds_open_ingress" {
+  description = "Open RDS port 3306 to 0.0.0.0/0. For learning only."
+  type        = bool
+  default     = true
+}
+
 variable "enable_waf" {
   description = "Create WAF WebACL (NOT free tier)"
   type        = bool

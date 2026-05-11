@@ -35,7 +35,8 @@ variable "logs_bucket_id" {
 }
 
 variable "kms_key_arn" {
-  type = string
+  type    = string
+  default = null
 }
 
 variable "vpc_id" {

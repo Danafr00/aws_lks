@@ -15,7 +15,8 @@ variable "alb_sg_id" {
 }
 
 variable "waf_acl_arn" {
-  type = string
+  type    = string
+  default = null
 }
 
 variable "enable_deletion_protection" {
