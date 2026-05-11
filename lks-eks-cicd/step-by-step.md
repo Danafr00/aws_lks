@@ -28,7 +28,7 @@
 Keep this terminal open — all later layers depend on these variables.
 
 ```bash
-export AWS_REGION=ap-southeast-1
+export AWS_REGION=us-east-1
 export CLUSTER_NAME=lks-wallet-eks
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "Account: $ACCOUNT_ID"
@@ -149,53 +149,14 @@ echo "Key saved to ~/.ssh/lks-eks-key.pem"
 
 ### 1.5 IAM Roles
 
+> **AWS Academy:** `iam:CreateRole` and `iam:AttachRolePolicy` are both blocked. Use the pre-existing `LabRole` for both the EKS cluster and node group. LabRole's trust policy already includes `eks.amazonaws.com` and `ec2.amazonaws.com`, and it has the broad permissions required by worker nodes.
+
 ```bash
-# ── Cluster Role ──────────────────────────────────────────────
-cat > /tmp/eks-cluster-trust.json << 'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {"Service": "eks.amazonaws.com"},
-    "Action": "sts:AssumeRole"}]
-}
-EOF
-
-aws iam create-role --role-name LKS-EKSClusterRole \
-  --assume-role-policy-document file:///tmp/eks-cluster-trust.json
-aws iam attach-role-policy --role-name LKS-EKSClusterRole \
-  --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
-
-CLUSTER_ROLE_ARN=$(aws iam get-role --role-name LKS-EKSClusterRole \
-  --query 'Role.Arn' --output text)
+# iam:CreateRole is blocked — use the pre-existing LabRole for both roles
+CLUSTER_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
+NODE_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
 echo "Cluster Role: $CLUSTER_ROLE_ARN"
-
-# ── Node Role ─────────────────────────────────────────────────
-cat > /tmp/eks-node-trust.json << 'EOF'
-{
-  "Version": "2012-10-17",
-  "Statement": [{"Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"},
-    "Action": "sts:AssumeRole"}]
-}
-EOF
-
-aws iam create-role --role-name LKS-EKSNodeRole \
-  --assume-role-policy-document file:///tmp/eks-node-trust.json
-
-for POLICY in \
-  AmazonEKSWorkerNodePolicy \
-  AmazonEKS_CNI_Policy \
-  AmazonEC2ContainerRegistryReadOnly \
-  AmazonSSMManagedInstanceCore; do
-  aws iam attach-role-policy --role-name LKS-EKSNodeRole \
-    --policy-arn arn:aws:iam::aws:policy/$POLICY
-  echo "Attached $POLICY"
-done
-
-NODE_ROLE_ARN=$(aws iam get-role --role-name LKS-EKSNodeRole \
-  --query 'Role.Arn' --output text)
 echo "Node Role: $NODE_ROLE_ARN"
-
 echo "--- IAM done ---"
 ```
 
@@ -672,32 +633,16 @@ aws secretsmanager create-secret \
   --tags Key=Project,Value=nusantara-wallet
 ```
 
-### 5.2 App IRSA Role
+### 5.2 App Role
+
+> **AWS Academy:** `iam:CreateRole` and `iam:CreateOpenIDConnectProvider` are both blocked — IRSA is unavailable. Pods inherit the node EC2 instance profile (LabRole) automatically via IMDS. No service account annotation needed for AWS credentials; the ExternalSecretStore will use IMDS instead of JWT auth.
 
 ```bash
-cat > /tmp/wallet-app-policy.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue",
-     "Resource": "arn:aws:secretsmanager:${AWS_REGION}:${ACCOUNT_ID}:secret:lks/wallet/*"},
-    {"Effect": "Allow",
-     "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
-     "Resource": "*"}
-  ]
-}
-EOF
+# No IAM role creation needed — pods use LabRole via node instance profile
+echo "AWS credentials: node instance profile (LabRole) via IMDS"
 
-aws iam create-policy --policy-name LKS-WalletAppPolicy \
-  --policy-document file:///tmp/wallet-app-policy.json
-WALLET_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/LKS-WalletAppPolicy"
-
-# AWS Academy: iam:CreateRole blocked — use LabRole ARN directly
-WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-
+# Service account is still created so ESO can reference it; no role annotation needed
 kubectl create serviceaccount wallet-api-sa -n wallet
-kubectl annotate serviceaccount wallet-api-sa -n wallet \
-  eks.amazonaws.com/role-arn=$WALLET_ROLE_ARN
 ```
 
 ### 5.3 Install External Secrets Operator
@@ -729,11 +674,8 @@ spec:
     aws:
       service: SecretsManager
       region: ${AWS_REGION}
-      auth:
-        jwt:
-          serviceAccountRef:
-            name: wallet-api-sa
-            namespace: wallet
+      # No auth block — ESO uses node instance profile (LabRole) via IMDS.
+      # IRSA (JWT auth) requires iam:CreateOpenIDConnectProvider which is blocked in this lab.
 EOF
 
 kubectl apply -f - << 'EOF'
@@ -783,138 +725,51 @@ kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | c
 
 ---
 
-## Layer 6 — GitHub Actions CI/CD
+## Layer 6 — CI/CD (Manual Push Workflow)
 
-Everything works manually. Now automate it: `git push` → build → push ECR → deploy to EKS.
+> **AWS Academy:** GitHub Actions CI/CD via OIDC is **not available** in this lab. Both `iam:CreateOpenIDConnectProvider` and `iam:CreateRole` are blocked — confirmed via live API. The manual push workflow below replicates the CI/CD steps locally.
 
-### 6.1 GitHub OIDC Provider
-
-> **AWS Academy:** `iam:CreateOpenIDConnectProvider` is blocked. Skip sections 6.1 and 6.2 — use static credentials stored as GitHub secrets instead (see section 6.3).
+### 6.1 Build + Tag + Push to ECR
 
 ```bash
-# Non-Academy only: skip this block in AWS Academy
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com \
-  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+# Tag with git SHA (same as what GitHub Actions would do)
+GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "v$(date +%Y%m%d%H%M%S)")
+IMAGE_TAG="${ECR_URI}:${GIT_SHA}"
+
+aws ecr get-login-password --region $AWS_REGION \
+  | docker login --username AWS --password-stdin \
+  "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+docker buildx build --platform linux/amd64 \
+  -t "$IMAGE_TAG" --push app/
+echo "Image pushed: $IMAGE_TAG"
 ```
 
-### 6.2 IAM Role for GitHub Actions
-
-Replace `YOUR_GITHUB_ORG/YOUR_REPO` with your actual repo.
+### 6.2 Deploy New Image to EKS
 
 ```bash
-GITHUB_REPO="YOUR_GITHUB_ORG/YOUR_REPO"
+# Update running deployment to new image tag
+kubectl set image deployment/wallet-api \
+  app="$IMAGE_TAG" -n wallet
 
-cat > /tmp/github-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-      },
-      "StringLike": {
-        "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:ref:refs/heads/main"
-      }
-    }
-  }]
-}
-EOF
-
-cat > /tmp/github-policy.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect": "Allow", "Action": [
-      "ecr:GetAuthorizationToken",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:InitiateLayerUpload",
-      "ecr:UploadLayerPart",
-      "ecr:CompleteLayerUpload",
-      "ecr:PutImage"
-    ], "Resource": "*"},
-    {"Effect": "Allow", "Action": "eks:DescribeCluster",
-     "Resource": "arn:aws:eks:${AWS_REGION}:${ACCOUNT_ID}:cluster/${CLUSTER_NAME}"}
-  ]
-}
-EOF
-
-aws iam create-role --role-name LKS-GitHubActionsRole \
-  --assume-role-policy-document file:///tmp/github-trust.json
-aws iam put-role-policy --role-name LKS-GitHubActionsRole \
-  --policy-name GitHubActionsPolicy \
-  --policy-document file:///tmp/github-policy.json
-
-GITHUB_ROLE_ARN=$(aws iam get-role --role-name LKS-GitHubActionsRole \
-  --query 'Role.Arn' --output text)
-echo "GitHub Actions Role: $GITHUB_ROLE_ARN"
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
 ```
 
-### 6.3 Grant GitHub Actions Access to EKS
+### 6.3 Verify
 
 ```bash
-aws eks create-access-entry \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $GITHUB_ROLE_ARN \
-  --region $AWS_REGION
-
-aws eks associate-access-policy \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $GITHUB_ROLE_ARN \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy \
-  --access-scope type=namespace,namespaces=wallet \
-  --region $AWS_REGION
-```
-
-### 6.4 Set GitHub Repository Secrets
-
-In GitHub → **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|---|---|
-| `AWS_ACCOUNT_ID` | Your 12-digit account ID |
-| `AWS_REGION` | `ap-southeast-1` |
-| `EKS_CLUSTER_NAME` | `lks-wallet-eks` |
-| `AWS_ROLE_ARN` | Value of `$GITHUB_ROLE_ARN` |
-
-### 6.5 Test the Pipeline
-
-```bash
-# Make a small change and push
-echo "# deploy $(date)" >> app/main.go
-git add app/main.go
-git commit -m "test: trigger CI/CD pipeline"
-git push origin main
-
-# Watch in GitHub Actions UI
-echo "Watch: https://github.com/${GITHUB_REPO}/actions"
-```
-
-The workflow (`.github/workflows/deploy.yml`) runs:
-1. **test** — `go test ./...` + `go vet ./...`
-2. **build-and-push** — build image, tag with git SHA, push to ECR
-3. **deploy** — run DB migration Job → `kubectl set image` → `kubectl rollout status` → auto-rollback on failure
-
-### 6.6 Verify
-
-```bash
-# Confirm new image (git SHA) is running
 kubectl get pods -n wallet -o wide
 kubectl describe pods -n wallet | grep "Image:"
-# Should show ECR URI with new SHA tag
+# Should show ECR URI with the new SHA tag
 
 kubectl rollout history deployment/wallet-api -n wallet
+curl http://$ELB/health/live
+# Expected: HTTP 200
 ```
 
 **Layer 6 checkpoint:**
-- [ ] All 3 GitHub Actions jobs passed
-- [ ] Pod image tag matches the git commit SHA
+- [ ] Image in ECR tagged with git SHA
+- [ ] Pod image tag matches the SHA
 - [ ] `curl http://$ELB/health/live` returns 200
 
 ---
@@ -961,19 +816,7 @@ aws ec2 release-address --allocation-id $EIP
 aws secretsmanager delete-secret --secret-id lks/wallet/app --force-delete-without-recovery
 aws secretsmanager delete-secret --secret-id lks/wallet/db --force-delete-without-recovery
 
-# 9. Delete IAM roles and policies
-for ROLE in LKS-GitHubActionsRole LKS-ExternalSecretsRole LKS-WalletAppRole \
-            LKS-EFSCSIDriverRole LKS-LBCRole LKS-EKSNodeRole LKS-EKSClusterRole; do
-  for P in $(aws iam list-attached-role-policies --role-name $ROLE \
-    --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null); do
-    aws iam detach-role-policy --role-name $ROLE --policy-arn $P
-  done
-  aws iam delete-role-policy --role-name $ROLE --policy-name GitHubActionsPolicy 2>/dev/null
-  aws iam delete-role --role-name $ROLE 2>/dev/null && echo "Deleted $ROLE"
-done
-for P in $LBC_POLICY_ARN $EFS_POLICY_ARN $WALLET_POLICY_ARN; do
-  aws iam delete-policy --policy-arn $P 2>/dev/null
-done
+# 9. IAM — no custom roles were created (used LabRole throughout); nothing to delete.
 
 # 10. Delete VPC
 aws ec2 delete-security-group --group-id $RDS_SG

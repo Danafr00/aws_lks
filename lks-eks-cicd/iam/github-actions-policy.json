@@ -15,12 +15,12 @@
         "ecr:UploadLayerPart",
         "ecr:CompleteLayerUpload"
       ],
-      "Resource": "arn:aws:ecr:ap-southeast-1:*:repository/lks-wallet-api"
+      "Resource": "arn:aws:ecr:us-east-1:*:repository/lks-wallet-api"
     },
     {
       "Effect": "Allow",
       "Action": "eks:DescribeCluster",
-      "Resource": "arn:aws:eks:ap-southeast-1:*:cluster/lks-wallet-eks"
+      "Resource": "arn:aws:eks:us-east-1:*:cluster/lks-wallet-eks"
     }
   ]
 }

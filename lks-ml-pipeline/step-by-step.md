@@ -164,7 +164,7 @@ aws s3 ls "s3://${FEATURES_BUCKET}/features/"
 ```bash
 # Use the pre-existing LabRole for Glue.
 echo "Glue job role: $LAB_ROLE_ARN"
-
+```
 
 ### 2.2 Upload ETL Script + Create Glue Job
 
@@ -184,7 +184,7 @@ aws glue create-job \
     \"--S3_OUTPUT_PATH\": \"s3://${PROCESSED_BUCKET}/parquet/\"
   }" \
   --glue-version "4.0" \
-  --worker-type G.1X \
+  --worker-type G.025X \
   --number-of-workers 2
 
 echo "Running Glue ETL job..."

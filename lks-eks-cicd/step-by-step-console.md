@@ -4,13 +4,13 @@
 **Approach**: Build one layer at a time — verify it works before moving to the next.  
 **Region**: us-east-1 | **Cost warning**: EKS $0.10/hr, NAT Gateway $0.045/hr — delete after use.
 
-> **AWS Academy constraints:**
-> - Cannot create IAM roles → use pre-created Lab roles
-> - EKS cluster role: `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ`
-> - EKS node role: `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ`
-> - All other roles (EFS CSI, app workloads, GitHub Actions): use `LabRole`
-> - OIDC/IRSA is blocked (`iam:CreateOpenIDConnectProvider` denied) — use `Service type=LoadBalancer` (Classic ELB via in-tree cloud provider) instead of AWS Load Balancer Controller
-> - Region: **us-east-1**
+> **AWS Academy constraints (live-confirmed):**
+> - `iam:CreateRole` and `iam:CreateOpenIDConnectProvider` both blocked
+> - Use `LabRole` for all roles: EKS cluster, node group, EFS CSI, app workloads
+> - OIDC/IRSA blocked → ESO uses node instance profile via IMDS (no auth needed)
+> - Use `Service type=LoadBalancer` (Classic ELB via in-tree cloud provider) — no AWS Load Balancer Controller
+> - GitHub Actions OIDC not available → use manual build+push+deploy (Layer 6)
+> - Region: **us-east-1** | ap-southeast-1 blocked for all services
 
 > **Note**: kubectl, helm, and docker commands have no console equivalent. Each layer ends with a short terminal block for those. Everything else can be done in the AWS Console.
 
@@ -25,7 +25,7 @@
 | **3** | RDS subnet group + instance | Connect app to DB |
 | **4** | EFS + mount targets + CSI add-on | Install EFS CSI addon, mount into pods |
 | **5** | Secrets Manager + service account | Install ESO, create ExternalSecret |
-| **6** | GitHub secrets | Push code, watch pipeline |
+| **6** | — | Build + push to ECR, kubectl set image |
 
 ---
 
@@ -191,12 +191,12 @@ Note the Security Group ID — you will need it when creating the node group.
 
 ### 1.9 IAM Roles
 
-> **AWS Academy:** Skip IAM role creation — use pre-created Lab roles below.
+> **AWS Academy:** `iam:CreateRole` is blocked. Use `LabRole` for both the EKS cluster role and node role. LabRole trust policy already includes `eks.amazonaws.com` and `ec2.amazonaws.com`.
 
 | Role purpose | Role name to use |
 |---|---|
-| EKS Cluster Role | `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ` |
-| EKS Node Role | `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ` |
+| EKS Cluster Role | `LabRole` |
+| EKS Node Role | `LabRole` |
 
 ---
 
@@ -207,7 +207,7 @@ Note the Security Group ID — you will need it when creating the node group.
 **Step 1 — Configure cluster:**
 - Name: `lks-wallet-eks`
 - Kubernetes version: `1.31`
-- Cluster IAM role: `c204784a5219129l15015554t1w237675-LabEksClusterRole-bA6LonTl39fQ`
+- Cluster IAM role: `LabRole`
 - **Next**
 
 **Step 2 — Specify networking:**
@@ -254,7 +254,7 @@ kubectl get svc
 
 **Step 1 — Configure node group:**
 - Name: `lks-wallet-ng`
-- Node IAM role: `c204784a5219129l15015554t1w237675846-LabEksNodeRole-DThHzrr5ZMFZ`
+- Node IAM role: `LabRole`
 - Leave Launch template toggle **off**
 - **Next**
 
@@ -677,13 +677,13 @@ Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager
 
 ---
 
-### 5.2 App Service Account (Console + Terminal)
+### 5.2 App Service Account (Terminal)
 
-> **AWS Academy:** Skip App Role and App Policy creation — use `LabRole` directly for the wallet service account.
+> **AWS Academy:** `iam:CreateOpenIDConnectProvider` is blocked — IRSA is unavailable. Pods use the node EC2 instance profile (LabRole) via IMDS automatically. No role annotation needed on the service account.
 
 ```bash
-export WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-echo "Wallet Role: $WALLET_ROLE_ARN"
+# Service account created so ESO can reference it; no role annotation needed
+kubectl create serviceaccount wallet-api-sa -n wallet
 ```
 
 ---
@@ -696,13 +696,6 @@ echo "Wallet Role: $WALLET_ROLE_ARN"
 > ```
 
 ```bash
-export WALLET_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-
-# Create and annotate service account
-kubectl create serviceaccount wallet-api-sa -n wallet
-kubectl annotate serviceaccount wallet-api-sa -n wallet \
-  eks.amazonaws.com/role-arn=$WALLET_ROLE_ARN
-
 # Install External Secrets Operator
 helm repo add external-secrets https://charts.external-secrets.io && helm repo update
 helm install external-secrets external-secrets/external-secrets \
@@ -710,7 +703,7 @@ helm install external-secrets external-secrets/external-secrets \
 
 kubectl rollout status deployment external-secrets -n external-secrets
 
-# ClusterSecretStore
+# ClusterSecretStore — no auth block; ESO uses node instance profile via IMDS
 kubectl apply -f - << EOF
 apiVersion: external-secrets.io/v1beta1
 kind: ClusterSecretStore
@@ -721,11 +714,8 @@ spec:
     aws:
       service: SecretsManager
       region: ${AWS_REGION}
-      auth:
-        jwt:
-          serviceAccountRef:
-            name: wallet-api-sa
-            namespace: wallet
+      # No auth block — ESO uses node instance profile (LabRole) via IMDS.
+      # IRSA requires iam:CreateOpenIDConnectProvider which is blocked in this lab.
 EOF
 
 # ExternalSecret — pulls both secrets into one K8s Secret
@@ -772,71 +762,48 @@ kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | c
 
 ---
 
-## Layer 6 — GitHub Actions CI/CD
+## Layer 6 — CI/CD (Manual Push Workflow)
 
-> **AWS Academy:** GitHub OIDC role creation is blocked (`iam:CreateOpenIDConnectProvider` and `iam:CreateRole` denied). Use long-lived credentials stored as GitHub secrets instead.
+> **AWS Academy:** GitHub Actions CI/CD via OIDC is **not available** — `iam:CreateOpenIDConnectProvider` and `iam:CreateRole` both blocked (live-confirmed). The manual workflow below replicates the CI/CD steps locally.
 
-### 6.1 Grant LabRole Access to EKS (Terminal)
-
-```bash
-GITHUB_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/LabRole"
-
-aws eks create-access-entry \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $GITHUB_ROLE_ARN \
-  --region $AWS_REGION
-
-aws eks associate-access-policy \
-  --cluster-name $CLUSTER_NAME \
-  --principal-arn $GITHUB_ROLE_ARN \
-  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy \
-  --access-scope type=namespace,namespaces=wallet \
-  --region $AWS_REGION
-```
-
----
-
-### 6.2 GitHub Repository Secrets (GitHub UI)
-
-In your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
-
-| Secret name | Value |
-|---|---|
-| `AWS_ACCOUNT_ID` | Your 12-digit account ID |
-| `AWS_REGION` | `us-east-1` |
-| `EKS_CLUSTER_NAME` | `lks-wallet-eks` |
-| `AWS_ACCESS_KEY_ID` | Your voclabs access key (from AWS Details panel) |
-| `AWS_SECRET_ACCESS_KEY` | Your voclabs secret key |
-| `AWS_SESSION_TOKEN` | Your voclabs session token |
-
-> **Note:** Session tokens expire with the lab session. Update these secrets each time you start a new lab session.
-
----
-
-### 6.3 Trigger and Verify (Terminal)
+### 6.1 Build + Tag + Push to ECR (Terminal)
 
 ```bash
-# Make a small change and push
-echo "# deploy $(date)" >> app/main.go
-git add app/main.go
-git commit -m "test: trigger CI/CD pipeline"
-git push origin main
+# Tag with git SHA (same as GitHub Actions would do)
+GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "v$(date +%Y%m%d%H%M%S)")
+IMAGE_TAG="${ECR_URI}:${GIT_SHA}"
+
+aws ecr get-login-password --region $AWS_REGION \
+  | docker login --username AWS --password-stdin \
+  "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+docker buildx build --platform linux/amd64 \
+  -t "$IMAGE_TAG" --push app/
+echo "Image pushed: $IMAGE_TAG"
 ```
 
-Watch the GitHub Actions tab in your repo. The workflow runs:
-1. **test** — unit tests
-2. **build-and-push** — build image, tag with git SHA, push to ECR
-3. **deploy** — `kubectl set image` → `kubectl rollout status`
+### 6.2 Deploy New Image to EKS (Terminal)
 
-Verify after pipeline completes:
+```bash
+kubectl set image deployment/wallet-api \
+  app="$IMAGE_TAG" -n wallet
+
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
+```
+
+### 6.3 Verify (Terminal)
+
 ```bash
 kubectl describe pods -n wallet | grep "Image:"
-# Should show ECR URI with the new git SHA tag
+# Should show ECR URI with the new SHA tag
+
+curl http://$ELB/health/live
+# Expected: HTTP 200
 ```
 
 **Layer 6 checkpoint:**
-- [ ] All 3 GitHub Actions jobs passed (green)
-- [ ] Pod image tag in kubectl matches the git commit SHA
+- [ ] Image in ECR tagged with git SHA (visible in ECR Console)
+- [ ] Pod image tag matches the SHA
 - [ ] `curl http://$ELB/health/live` returns 200
 
 ---
@@ -875,12 +842,9 @@ kubectl describe pods -n wallet | grep "Image:"
    - Waiting period: 0 days → **Schedule deletion**
 2. Repeat for `lks/wallet/db`
 
-### Console: IAM → delete custom policies only
+### IAM — nothing to delete
 
-> **AWS Academy:** Do NOT delete Lab roles. Delete only the custom policies you created:
-
-- `LKS-WalletAppPolicy` (if created)
-- `LKS-EFSCSIPolicy`
+> **AWS Academy:** No custom roles or policies were created (used LabRole throughout). Nothing to clean up here.
 
 ### Console: NAT Gateway + Elastic IP
 
@@ -920,9 +884,8 @@ wallet-api pods  (private subnets, m7i-flex.large, AL2023)
     ├── RDS PostgreSQL   (private subnet, port 5432)
     └── EFS              (private subnet, NFS port 2049)
 
-GitHub Actions (on push to main):
-  test → build+push to ECR → kubectl set image → rollout
-  (uses static credentials — update secrets each lab session)
+CI/CD (manual — GitHub Actions OIDC blocked in lab):
+  build locally → push to ECR → kubectl set image → rollout
 ```
 
 ---
@@ -931,15 +894,14 @@ GitHub Actions (on push to main):
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `AccessDenied: iam:CreateRole` | AWS Academy voclabs policy blocks role creation | Use pre-created Lab roles — see section 1.9 |
-| `AccessDenied: iam:CreateOpenIDConnectProvider` | AWS Academy blocks OIDC provider creation | Already handled — `Service type=LoadBalancer` used instead; EFS CSI and app SA use LabRole ARN annotation |
+| `AccessDenied: iam:CreateRole` | voclabs policy blocks role creation | Use `LabRole` — see section 1.9 |
+| `AccessDenied: iam:CreateOpenIDConnectProvider` | voclabs policy blocks OIDC creation | Expected — ESO uses node instance profile via IMDS, no auth block in ClusterSecretStore |
 | Node group stuck `CREATING` | Launch template or wrong AMI | Delete, re-create with AL2023 and no launch template |
 | Classic ELB not provisioned | Subnet tags missing or wrong cluster name | Verify public subnets have `kubernetes.io/cluster/<cluster-name>` and `kubernetes.io/role/elb=1` tags |
 | `ExternalSecret` not syncing | LabRole can't read Secrets Manager | Check LabRole has `secretsmanager:GetSecretValue` permission |
 | EFS PVC stuck `Pending` (old error: `ProvisioningFailed`) | Dynamic provisioning requires EFS API calls — `CreateAccessPoint` blocked in Academy or CSI controller can't reach IMDS | Use static PV provisioning: apply `k8s/pv.yaml` with `<EFS_FILE_SYSTEM_ID>` patched, and `k8s/pvc.yaml` with `volumeName: wallet-uploads-pv` |
 | EFS CSI `No OpenIDConnect provider found` | Addon installed with `--service-account-role-arn` (even LabRole) triggers WebIdentity auth which requires OIDC | Delete addon and reinstall without `--service-account-role-arn` |
-| GitHub Actions `Unauthorized` to EKS | Access entry missing for LabRole | Run `aws eks create-access-entry` + `associate-access-policy` for LabRole ARN |
-| GitHub Actions credentials expired | Session token expired with lab session | Update `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` secrets |
+| `ExternalSecret` stays `SecretSyncError` | ESO ClusterSecretStore has auth block → triggers WebIdentity (OIDC blocked) | Remove `auth:` block from ClusterSecretStore so ESO uses IMDS |
 | `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
 | Classic ELB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
 | Pod connection timeout to RDS despite SG rule | Rule allows `lks-eks-node-sg` but pods use the auto-created EKS cluster SG | Add inbound rule for `eks-cluster-sg-lks-wallet-eks-*` SG on port 5432 |
