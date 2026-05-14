@@ -304,10 +304,15 @@ Navigate to **EC2 Console** → **Security Groups** (left panel under Network & 
    - Load balancer type: Application Load Balancer
    - Load balancer: `lks-nusantara-alb`
    - Container to load balance: `nusantara-shop 5000:5000`
-   - **Production listener port:** 80:HTTP
-   - **Test listener port:** 8080:HTTP
-   - **Target group 1 (Blue):** `lks-nusantara-tg-blue`
-   - **Target group 2 (Green):** `lks-nusantara-tg-green`
+   - **Production listener port:** `80:HTTP` → **Target group 1:** `lks-nusantara-tg-blue`
+   - **Test listener port:** `8080:HTTP` → **Target group 2:** `lks-nusantara-tg-green`
+
+   > **Why two listeners + two target groups:**
+   > - Port 80 (production) starts pointing at **TG-Blue** (current live tasks)
+   > - Port 8080 (test) points at **TG-Green** — CodeDeploy starts new tasks here first
+   > - After green tasks pass health checks, CodeDeploy shifts port 80 → TG-Green
+   > - Old blue tasks terminate after 5 min
+   > - Target group 1 always pairs with the production listener; target group 2 always pairs with the test listener
 9. Click **Create**
 
 > Wait ~3–5 minutes for 2 tasks to reach **Running** state.
