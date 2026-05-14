@@ -14,7 +14,7 @@
 | **2** | ECR + Containerized App | Pods pull from ECR | `scripts/layer2-ecr.sh` |
 | **3** | RDS PostgreSQL | App connects to DB | `scripts/layer3-rds.sh` |
 | **4** | EFS Shared Storage | Pods read/write shared files | `scripts/layer4-efs.sh` |
-| **5** | Secrets Manager | App reads secrets from AWS | `scripts/layer5-secrets.sh` |
+| **5** | Secrets Manager | App reads DB + JWT secrets from k8s Secret | manual (see Layer 5) |
 | **6** | GitHub Actions CI/CD | `git push` → auto deploy | manual (see Layer 6) |
 
 > **Scripts** (layers 2–5) are AWS Academy compatible. They use `LabRole` for all addon service accounts. Set `AWS_REGION` and `CLUSTER_NAME` environment variables before running if your values differ from the defaults (`us-east-1`, `lks-wallet-eks`).
@@ -350,6 +350,9 @@ Hello-app verified the Classic ELB works. Now delete it and apply the real manif
 kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
+# Create service account — plain SA, no IAM annotation (LabRole IRSA/Pod Identity blocked in Academy)
+kubectl create serviceaccount wallet-api-sa -n wallet
+
 # Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
 sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
@@ -448,7 +451,7 @@ DB_PASSWORD=$(aws secretsmanager get-secret-value \
   --query 'SecretString' --output text \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['password'])")
 
-# Create canonical secret name that ExternalSecret (k8s/external-secret.yaml) references
+# Store password under canonical name (referenced in Layer 5)
 aws secretsmanager create-secret \
   --name lks/wallet/db \
   --secret-string "{\"password\":\"${DB_PASSWORD}\",\"username\":\"walletadmin\"}" \
@@ -617,111 +620,58 @@ kubectl scale deployment wallet-api -n wallet --replicas=1
 
 ## Layer 5 — Secrets Manager
 
-Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager.
+Adds `JWT_SECRET` from Secrets Manager into the existing `wallet-api-secret`. No ESO or IRSA needed — pull directly with AWS CLI using the current session (LabRole via voclabs).
 
-### 5.1 Create Secrets
+> **AWS Academy:** `iam:CreateOpenIDConnectProvider` and `iam:CreateRole` are blocked — IRSA and ESO's JWT auth mode are both unavailable. Pull secrets directly from Secrets Manager using the current voclabs session credentials, then write into the k8s Secret. Functionally equivalent for the exam.
+
+### 5.1 Create JWT Secret
 
 ```bash
-# RDS auto-created the DB password secret — verify:
-aws secretsmanager describe-secret --secret-id lks/wallet/db
-
-# Create JWT secret
 JWT_SECRET=$(openssl rand -hex 32)
 aws secretsmanager create-secret \
   --name lks/wallet/app \
   --secret-string "{\"JWT_SECRET\":\"${JWT_SECRET}\"}" \
   --tags Key=Project,Value=nusantara-wallet
+echo "JWT secret stored in Secrets Manager."
 ```
 
-### 5.2 App Role
+### 5.2 Update k8s Secret
 
-> **AWS Academy:** `iam:CreateRole` and `iam:CreateOpenIDConnectProvider` are both blocked — IRSA is unavailable. Pods inherit the node EC2 instance profile (LabRole) automatically via IMDS. No service account annotation needed for AWS credentials; the ExternalSecretStore will use IMDS instead of JWT auth.
-
-```bash
-# No IAM role creation needed — pods use LabRole via node instance profile
-echo "AWS credentials: node instance profile (LabRole) via IMDS"
-
-# Service account is still created so ESO can reference it; no role annotation needed
-kubectl create serviceaccount wallet-api-sa -n wallet
-```
-
-### 5.3 Install External Secrets Operator
+`wallet-api-secret` was created in Layer 3 with only `DB_PASSWORD`. Re-create it with both keys so the deployment picks up `JWT_SECRET` via `secretRef`.
 
 ```bash
-helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
-helm install external-secrets external-secrets/external-secrets \
-  -n external-secrets --create-namespace
+# Read JWT_SECRET back from Secrets Manager
+JWT_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id lks/wallet/app \
+  --query 'SecretString' --output text \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['JWT_SECRET'])")
 
-kubectl rollout status deployment external-secrets -n external-secrets
-```
+# Read existing DB_PASSWORD from k8s secret
+DB_PASSWORD=$(kubectl get secret wallet-api-secret -n wallet \
+  -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
 
-### 5.4 ClusterSecretStore + ExternalSecret
+# Replace secret (dry-run + apply is safe — no delete/recreate race)
+kubectl create secret generic wallet-api-secret \
+  --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+  --from-literal=JWT_SECRET="$JWT_SECRET" \
+  -n wallet --dry-run=client -o yaml | kubectl apply -f -
 
-> **Delete the manual secret from Layer 3 first.** ExternalSecret uses `creationPolicy: Owner` — it won't adopt a secret it didn't create.
-> ```bash
-> kubectl delete secret wallet-api-secret -n wallet
-> ```
-
-```bash
-kubectl apply -f - << EOF
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: aws-secrets-store
-spec:
-  provider:
-    aws:
-      service: SecretsManager
-      region: ${AWS_REGION}
-      # No auth block — ESO uses node instance profile (LabRole) via IMDS.
-      # IRSA (JWT auth) requires iam:CreateOpenIDConnectProvider which is blocked in this lab.
-EOF
-
-kubectl apply -f - << 'EOF'
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: wallet-secrets
-  namespace: wallet
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aws-secrets-store
-    kind: ClusterSecretStore
-  target:
-    name: wallet-secrets
-    creationPolicy: Owner
-  data:
-  - secretKey: DB_PASSWORD
-    remoteRef:
-      key: lks/wallet/db
-      property: password
-  - secretKey: JWT_SECRET
-    remoteRef:
-      key: lks/wallet/app
-      property: JWT_SECRET
-EOF
-
-kubectl get externalsecret wallet-secrets -n wallet
-# Expected: SecretSynced
-```
-
-### 5.5 Inject Secrets into Deployment
-
-```bash
 kubectl rollout restart deployment/wallet-api -n wallet
-kubectl rollout status deployment/wallet-api -n wallet
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
+```
 
-# Verify secrets are injected (names only, not values)
+### 5.3 Verify
+
+```bash
 POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | cut -d= -f1"
 # Expected: DB_PASSWORD  JWT_SECRET
 ```
 
 **Layer 5 checkpoint:**
-- [ ] `kubectl get secret wallet-secrets -n wallet` exists and is synced
-- [ ] Pods have DB_PASSWORD and JWT_SECRET env vars
+- [ ] `kubectl get secret wallet-api-secret -n wallet` shows `DATA=2`
+- [ ] Pod has `DB_PASSWORD` and `JWT_SECRET` env vars
+- [ ] `curl http://$ELB/health/ready` returns 200
 
 ---
 
@@ -779,7 +729,6 @@ curl http://$ELB/health/live
 ```bash
 # 1. Delete k8s resources
 kubectl delete namespace wallet
-helm uninstall external-secrets -n external-secrets
 
 # 2. Delete node group
 aws eks delete-nodegroup \
@@ -849,7 +798,7 @@ Classic ELB  (internet-facing, public subnets)
     ▼
 wallet-api pods  (private subnets, m7i-flex.large)
     ├── ConfigMap        → non-sensitive env vars (DB_HOST, PORT, etc.)
-    ├── ExternalSecret   → DB_PASSWORD + JWT_SECRET from Secrets Manager
+    ├── k8s Secret       → DB_PASSWORD + JWT_SECRET (pulled from Secrets Manager via CLI)
     ├── EFS PVC          → /app/uploads  (ReadWriteMany across pods)
     └── ECR image        → tagged with git commit SHA
     │

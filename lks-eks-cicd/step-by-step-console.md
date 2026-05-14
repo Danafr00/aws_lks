@@ -24,7 +24,7 @@
 | **2** | Create ECR repository | Build + push image, update deployment |
 | **3** | RDS subnet group + instance | Connect app to DB |
 | **4** | EFS + mount targets + CSI add-on | Install EFS CSI addon, mount into pods |
-| **5** | Secrets Manager + service account | Install ESO, create ExternalSecret |
+| **5** | Secrets Manager | Pull DB + JWT secrets → update k8s Secret |
 | **6** | — | Build + push to ECR, kubectl set image |
 
 ---
@@ -397,6 +397,9 @@ docker buildx build --platform linux/amd64 \
 kubectl delete deployment wallet-app -n wallet
 echo "Hello-app removed."
 
+# Create service account — plain SA, no IAM annotation (LabRole IRSA/Pod Identity blocked in Academy)
+kubectl create serviceaccount wallet-api-sa -n wallet
+
 # Apply real deployment + service (service.yaml keeps type: LoadBalancer from Layer 1)
 sed "s|<ACCOUNT_ID>|$ACCOUNT_ID|g; s|<AWS_REGION>|$AWS_REGION|g" k8s/deployment.yaml | kubectl apply -f -
 kubectl apply -f k8s/service.yaml
@@ -660,95 +663,48 @@ kubectl scale deployment wallet-api -n wallet --replicas=1
 
 ## Layer 5 — Secrets Manager
 
-Replace plain ConfigMap credentials with secrets pulled from AWS Secrets Manager.
+Adds `JWT_SECRET` from Secrets Manager into the existing `wallet-api-secret`. No ESO or IRSA needed — pull directly with AWS CLI using the current session (LabRole via voclabs).
+
+> **AWS Academy:** `iam:CreateOpenIDConnectProvider` and `iam:CreateRole` are blocked — IRSA and ESO's JWT auth mode are both unavailable. Pull secrets directly from Secrets Manager using the current voclabs session credentials, then write into the k8s Secret. Functionally equivalent for the exam.
 
 ### 5.1 Create JWT Secret (Console)
 
 1. Open [Secrets Manager Console](https://console.aws.amazon.com/secretsmanager) → **Store a new secret**
 2. Secret type: **Other type of secret**
 3. Key/value pairs → **Add row**:
-   - Key: `JWT_SECRET` | Value: any long random string (e.g., paste output of `openssl rand -hex 32`)
+   - Key: `JWT_SECRET` | Value: any long random string (e.g., paste output of `openssl rand -hex 32` in terminal)
 4. **Next**
 5. Secret name: `lks/wallet/app`
 6. Add tag: Key=`Project` Value=`nusantara-wallet`
 7. **Next** → **Next** → **Store**
 
-> The DB password secret (`lks/wallet/db`) was auto-created by RDS when you chose "Managed in AWS Secrets Manager". Verify it exists in the console.
+> The DB password secret (`lks/wallet/db`) was stored in Layer 3. Verify it exists in Secrets Manager console.
 
 ---
 
-### 5.2 App Service Account (Terminal)
+### 5.2 Update k8s Secret (Terminal)
 
-> **AWS Academy:** `iam:CreateOpenIDConnectProvider` is blocked — IRSA is unavailable. Pods use the node EC2 instance profile (LabRole) via IMDS automatically. No role annotation needed on the service account.
-
-```bash
-# Service account created so ESO can reference it; no role annotation needed
-kubectl create serviceaccount wallet-api-sa -n wallet
-```
-
----
-
-### 5.3 Install ESO + Pull Secrets (Terminal)
-
-> **Delete the manual secret from Layer 3 first.** ExternalSecret uses `creationPolicy: Owner` — it won't adopt a secret it didn't create.
-> ```bash
-> kubectl delete secret wallet-api-secret -n wallet
-> ```
+`wallet-api-secret` was created in Layer 3 with only `DB_PASSWORD`. Re-create it with both keys so the deployment picks up `JWT_SECRET` via `secretRef`.
 
 ```bash
-# Install External Secrets Operator
-helm repo add external-secrets https://charts.external-secrets.io && helm repo update
-helm install external-secrets external-secrets/external-secrets \
-  -n external-secrets --create-namespace
+# Read JWT_SECRET from Secrets Manager
+JWT_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id lks/wallet/app \
+  --query 'SecretString' --output text \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['JWT_SECRET'])")
 
-kubectl rollout status deployment external-secrets -n external-secrets
+# Read existing DB_PASSWORD from k8s secret
+DB_PASSWORD=$(kubectl get secret wallet-api-secret -n wallet \
+  -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
 
-# ClusterSecretStore — no auth block; ESO uses node instance profile via IMDS
-kubectl apply -f - << EOF
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: aws-secrets-store
-spec:
-  provider:
-    aws:
-      service: SecretsManager
-      region: ${AWS_REGION}
-      # No auth block — ESO uses node instance profile (LabRole) via IMDS.
-      # IRSA requires iam:CreateOpenIDConnectProvider which is blocked in this lab.
-EOF
-
-# ExternalSecret — pulls both secrets into one K8s Secret
-kubectl apply -f - << 'EOF'
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: wallet-secrets
-  namespace: wallet
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aws-secrets-store
-    kind: ClusterSecretStore
-  target:
-    name: wallet-secrets
-    creationPolicy: Owner
-  data:
-  - secretKey: DB_PASSWORD
-    remoteRef:
-      key: lks/wallet/db
-      property: password
-  - secretKey: JWT_SECRET
-    remoteRef:
-      key: lks/wallet/app
-      property: JWT_SECRET
-EOF
-
-kubectl get externalsecret wallet-secrets -n wallet
-# Expected: SecretSynced
+# Replace secret (dry-run + apply is safe — no delete/recreate race)
+kubectl create secret generic wallet-api-secret \
+  --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+  --from-literal=JWT_SECRET="$JWT_SECRET" \
+  -n wallet --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl rollout restart deployment/wallet-api -n wallet
-kubectl rollout status deployment/wallet-api -n wallet
+kubectl rollout status deployment/wallet-api -n wallet --timeout=300s
 
 # Verify secrets are injected (names only, not values)
 POD=$(kubectl get pod -n wallet -l app=wallet-api -o jsonpath='{.items[0].metadata.name}')
@@ -757,8 +713,9 @@ kubectl exec -n wallet $POD -- sh -c "env | grep -E 'DB_PASSWORD|JWT_SECRET' | c
 ```
 
 **Layer 5 checkpoint:**
-- [ ] `kubectl get secret wallet-secrets -n wallet` exists
-- [ ] Pods have `DB_PASSWORD` and `JWT_SECRET` env vars
+- [ ] `kubectl get secret wallet-api-secret -n wallet` shows `DATA=2`
+- [ ] Pod has `DB_PASSWORD` and `JWT_SECRET` env vars
+- [ ] `curl http://$ELB/health/ready` returns 200
 
 ---
 
@@ -877,7 +834,7 @@ Classic ELB  (internet-facing, public subnets)
     ▼
 wallet-api pods  (private subnets, m7i-flex.large, AL2023)
     ├── ConfigMap        → DB_HOST, PORT, etc.
-    ├── ExternalSecret   → DB_PASSWORD + JWT_SECRET from Secrets Manager
+    ├── k8s Secret       → DB_PASSWORD + JWT_SECRET (pulled from Secrets Manager via CLI)
     ├── EFS PVC          → /app/uploads  (ReadWriteMany)
     └── ECR image        → tagged with git SHA
     │
@@ -895,13 +852,11 @@ CI/CD (manual — GitHub Actions OIDC blocked in lab):
 | Symptom | Cause | Fix |
 |---|---|---|
 | `AccessDenied: iam:CreateRole` | voclabs policy blocks role creation | Use `LabRole` — see section 1.9 |
-| `AccessDenied: iam:CreateOpenIDConnectProvider` | voclabs policy blocks OIDC creation | Expected — ESO uses node instance profile via IMDS, no auth block in ClusterSecretStore |
+| `AccessDenied: iam:CreateOpenIDConnectProvider` | voclabs policy blocks OIDC creation | Expected — Layer 5 pulls secrets directly via AWS CLI, no ESO/IRSA needed |
 | Node group stuck `CREATING` | Launch template or wrong AMI | Delete, re-create with AL2023 and no launch template |
 | Classic ELB not provisioned | Subnet tags missing or wrong cluster name | Verify public subnets have `kubernetes.io/cluster/<cluster-name>` and `kubernetes.io/role/elb=1` tags |
-| `ExternalSecret` not syncing | LabRole can't read Secrets Manager | Check LabRole has `secretsmanager:GetSecretValue` permission |
 | EFS PVC stuck `Pending` (old error: `ProvisioningFailed`) | Dynamic provisioning requires EFS API calls — `CreateAccessPoint` blocked in Academy or CSI controller can't reach IMDS | Use static PV provisioning: apply `k8s/pv.yaml` with `<EFS_FILE_SYSTEM_ID>` patched, and `k8s/pvc.yaml` with `volumeName: wallet-uploads-pv` |
 | EFS CSI `No OpenIDConnect provider found` | Addon installed with `--service-account-role-arn` (even LabRole) triggers WebIdentity auth which requires OIDC | Delete addon and reinstall without `--service-account-role-arn` |
-| `ExternalSecret` stays `SecretSyncError` | ESO ClusterSecretStore has auth block → triggers WebIdentity (OIDC blocked) | Remove `auth:` block from ClusterSecretStore so ESO uses IMDS |
 | `ImagePullBackOff: no match for platform` | Image built on Apple Silicon (arm64) but nodes are amd64 | Rebuild with `docker buildx build --platform linux/amd64` |
 | Classic ELB returns 502 after switching to Go app | Service `targetPort` still set to 80 (nginx default) but Go app listens on 8080 | `kubectl patch svc wallet-api-svc -n wallet --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'` |
 | Pod connection timeout to RDS despite SG rule | Rule allows `lks-eks-node-sg` but pods use the auto-created EKS cluster SG | Add inbound rule for `eks-cluster-sg-lks-wallet-eks-*` SG on port 5432 |
