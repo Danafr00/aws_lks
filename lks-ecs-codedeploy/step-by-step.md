@@ -392,6 +392,10 @@ aws ecs register-task-definition \
 
 ### 4.7 Create ECS Service with CODE_DEPLOY Controller
 
+> **CLI vs Console difference:** `create-service` only takes the initial (blue) target group.
+> The test listener (port 8080) and green target group are configured in the CodeDeploy
+> deployment group at Layer 6, not here. The console combines both steps into one form.
+
 ```bash
 # IMPORTANT: deployment-controller must be CODE_DEPLOY for Blue/Green
 aws ecs create-service \
