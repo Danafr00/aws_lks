@@ -16,7 +16,7 @@
 | **3** | ElastiCache Redis + SSM parameter | `CacheClusterStatus: available` |
 | **4** | ECS Fargate + ALB + Target Groups + Service | `curl ALB/health` → `{"status":"ok","redis":"connected"}` |
 | **5** | S3 Static Website (frontend) | Browser opens URL, products load |
-| **6** | CodeCommit + CodePipeline + CodeDeploy | Pipeline `Succeeded`, deployment complete |
+| **6** | CodeCommit + CodeDeploy (Blue/Green) | Deployment `Succeeded`, traffic on green tasks |
 | **7** | Blue/Green demo (v2.0.0) | `/health` returns `"version":"2.0.0","color":"green"` |
 
 ---
@@ -76,7 +76,9 @@ Expected: `Login Succeeded`
 # From the lks-ecs-codedeploy directory
 cd app/
 
-docker build \
+# --platform linux/amd64 required if building on Apple Silicon (M1/M2/M3)
+docker buildx build \
+  --platform linux/amd64 \
   --build-arg APP_VERSION=1.0.0 \
   -t nusantara-shop:1.0.0 \
   -t nusantara-shop:latest \
@@ -89,6 +91,7 @@ docker images nusantara-shop
 ### 1.4 Tag and Push
 
 ```bash
+# If built with buildx --push, image is already in ECR. Otherwise tag and push:
 docker tag nusantara-shop:1.0.0 $ECR_URI:1.0.0
 docker tag nusantara-shop:latest $ECR_URI:latest
 
@@ -191,36 +194,44 @@ aws elasticache create-cache-subnet-group \
   --tags Key=Project,Value=nusantara-shop Key=Environment,Value=production Key=ManagedBy,Value=LKS-Team
 ```
 
-### 3.2 Create Redis Cluster
+### 3.2 Create Redis Replication Group
+
+Use `create-replication-group` (not `create-cache-cluster`) — this gives a proper primary endpoint in `ng.0001` format which the app requires.
 
 ```bash
-aws elasticache create-cache-cluster \
-  --cache-cluster-id lks-nusantara-redis \
+aws elasticache create-replication-group \
+  --replication-group-id lks-nusantara-redis \
+  --replication-group-description "NusantaraShop Redis cache" \
   --cache-node-type cache.t3.micro \
   --engine redis \
   --engine-version 7.1 \
-  --num-cache-nodes 1 \
+  --num-cache-clusters 1 \
   --cache-subnet-group-name lks-nusantara-redis-subnet \
   --security-group-ids $REDIS_SG_ID \
+  --no-transit-encryption-enabled \
   --tags Key=Project,Value=nusantara-shop Key=Environment,Value=production Key=ManagedBy,Value=LKS-Team
 ```
+
+> **Note:** `--no-transit-encryption-enabled` keeps TLS off from the start. If TLS was accidentally enabled, you must do a two-step disable: `required` → `preferred` → disabled (each step waits ~10 min for cluster to become available again).
 
 ### 3.3 Wait and Get Endpoint
 
 ```bash
 # Wait for cluster to become available (~5 minutes)
-aws elasticache wait cache-cluster-available \
-  --cache-cluster-id lks-nusantara-redis
+aws elasticache wait replication-group-available \
+  --replication-group-id lks-nusantara-redis
 
-# Get endpoint
-REDIS_ENDPOINT=$(aws elasticache describe-cache-clusters \
-  --cache-cluster-id lks-nusantara-redis \
-  --show-cache-node-info \
-  --query 'CacheClusters[0].CacheNodes[0].Endpoint.Address' \
+# Get primary endpoint (ng.0001 format)
+REDIS_ENDPOINT=$(aws elasticache describe-replication-groups \
+  --replication-group-id lks-nusantara-redis \
+  --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' \
   --output text)
 
 echo "Redis endpoint: $REDIS_ENDPOINT"
+# Expected format: lks-nusantara-redis.xxxxxx.ng.0001.use1.cache.amazonaws.com
 ```
+
+> **Critical:** Always use the `ng.0001` primary endpoint. Do NOT use `master.<id>.<suffix>` — that format does not exist for ElastiCache replication groups.
 
 ### 3.4 Store in SSM Parameter Store
 
@@ -457,20 +468,34 @@ aws s3api put-bucket-policy \
   }"
 ```
 
-### 5.2 Upload Frontend with ALB URL Injected
+### 5.2 Set ALB URL in index.html and Upload
 
+Open `app/static/index.html` and find line 78:
+```javascript
+const API = '';
+```
+Replace with your ALB DNS:
+```javascript
+const API = 'http://<YOUR-ALB-DNS>';
+```
+
+Get your ALB DNS if needed:
 ```bash
-# Inject ALB URL into index.html
-cp app/static/index.html /tmp/index.html
-sed -i "s|const API = '';|const API = 'http://$ALB_DNS';|g" /tmp/index.html
+ALB_DNS=$(aws elbv2 describe-load-balancers --names lks-nusantara-alb \
+  --query 'LoadBalancers[0].DNSName' --output text)
+echo $ALB_DNS
+```
 
-# Upload to S3
-aws s3 cp /tmp/index.html s3://$BUCKET_NAME/index.html \
+Then upload to S3:
+```bash
+aws s3 cp app/static/index.html s3://$BUCKET_NAME/index.html \
   --content-type text/html
 
 WEBSITE_URL="http://$BUCKET_NAME.s3-website-us-east-1.amazonaws.com"
 echo "Frontend: $WEBSITE_URL"
 ```
+
+> The `index.html` in the repo keeps `const API = ''` as a placeholder. Always set the actual ALB URL before uploading — without it the frontend cannot reach the API.
 
 **Layer 5 checkpoint — verify before continuing:**
 - [ ] Open `$WEBSITE_URL` in browser — NusantaraShop UI loads
@@ -479,21 +504,11 @@ echo "Frontend: $WEBSITE_URL"
 
 ---
 
-## Layer 6 — CodeCommit + CodePipeline + CodeDeploy
+## Layer 6 — CodeCommit + CodeDeploy (Blue/Green)
 
-### 6.1 Create S3 Artifact Bucket
+> **Note:** CodePipeline requires `codepipeline.amazonaws.com` in the IAM role trust policy. If using LabRole (AWS Academy), CodePipeline is not available. This layer uses CodeDeploy directly instead.
 
-```bash
-PIPELINE_BUCKET="lks-nusantara-pipeline-$ACCOUNT_ID"
-
-aws s3api create-bucket --bucket $PIPELINE_BUCKET --region us-east-1
-
-aws s3api put-bucket-versioning \
-  --bucket $PIPELINE_BUCKET \
-  --versioning-configuration Status=Enabled
-```
-
-### 6.2 Create CodeCommit Repository
+### 6.1 Create CodeCommit Repository
 
 ```bash
 REPO_URL=$(aws codecommit create-repository \
@@ -505,10 +520,10 @@ REPO_URL=$(aws codecommit create-repository \
 echo "Repo URL: $REPO_URL"
 ```
 
-### 6.3 Push Pipeline Files to CodeCommit
+### 6.2 Push Deployment Files to CodeCommit
 
 ```bash
-# Configure git credentials helper
+# Configure git credentials helper (one time)
 git config --global credential.helper '!aws codecommit credential-helper $@'
 git config --global credential.UseHttpPath true
 
@@ -516,40 +531,82 @@ git config --global credential.UseHttpPath true
 cd /tmp
 git clone $REPO_URL nusantara-app
 cd nusantara-app
-
-# Initialize main branch
 git checkout -b main
 
-# Copy pipeline files
-cp /path/to/lks-ecs-codedeploy/pipeline/appspec.yaml .
-cp /path/to/lks-ecs-codedeploy/pipeline/taskdef.json .
+# Get current values
+REDIS_ENDPOINT=$(aws ssm get-parameter --name /nusantara-shop/redis-host \
+  --query 'Parameter.Value' --output text)
 
-# Update imageDetail.json with current ECR image
-cat > imageDetail.json << EOF
+# Copy appspec.yaml
+cp /path/to/lks-ecs-codedeploy/pipeline/appspec.yaml .
+
+# Create taskdef.json with real values (no <IMAGE1_NAME> placeholder needed for direct deploy)
+cat > taskdef.json << EOF
 {
-  "ImageURI": "$ECR_URI:latest"
+  "family": "nusantara-shop",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "$LAB_ROLE",
+  "taskRoleArn": "$LAB_ROLE",
+  "containerDefinitions": [{
+    "name": "nusantara-shop",
+    "image": "$ECR_URI:latest",
+    "portMappings": [{"containerPort": 5000, "protocol": "tcp"}],
+    "environment": [
+      {"name": "APP_VERSION", "value": "1.0.0"},
+      {"name": "APP_COLOR", "value": "blue"},
+      {"name": "REDIS_HOST", "value": "$REDIS_ENDPOINT"},
+      {"name": "REDIS_PORT", "value": "6379"}
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/nusantara-shop",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "ecs"
+      }
+    },
+    "essential": true,
+    "healthCheck": {
+      "command": ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"],
+      "interval": 30,
+      "timeout": 5,
+      "retries": 3,
+      "startPeriod": 60
+    }
+  }]
 }
 EOF
 
-# Update taskdef.json — replace placeholder with actual ECR image
-sed -i "s|<IMAGE1_NAME>|$ECR_URI:latest|g" taskdef.json
-sed -i "s|547849081977.dkr.ecr.us-east-1.amazonaws.com/nusantara-shop:latest|$ECR_URI:latest|g" taskdef.json
-
-# Update Redis endpoint in taskdef.json
-sed -i "s|/nusantara-shop/redis-host|$REDIS_ENDPOINT|g" taskdef.json
-
-git add appspec.yaml taskdef.json imageDetail.json
-git commit -m "feat: initial CI/CD pipeline configuration"
+git add appspec.yaml taskdef.json
+git commit -m "feat: add CodeDeploy deployment files"
 git push origin main
 ```
 
-### 6.4 Create CodeDeploy Application
+### 6.3 Create CodeDeploy Application
 
 ```bash
 aws deploy create-application \
   --application-name lks-nusantara-app \
   --compute-platform ECS \
   --tags Key=Project,Value=nusantara-shop Key=Environment,Value=production Key=ManagedBy,Value=LKS-Team
+```
+
+### 6.4 Get Listener ARNs
+
+```bash
+LISTENER_PROD_ARN=$(aws elbv2 describe-listeners \
+  --load-balancer-arn $ALB_ARN \
+  --query 'Listeners[?Port==`80`].ListenerArn' --output text)
+
+LISTENER_TEST_ARN=$(aws elbv2 describe-listeners \
+  --load-balancer-arn $ALB_ARN \
+  --query 'Listeners[?Port==`8080`].ListenerArn' --output text)
+
+echo "Prod listener: $LISTENER_PROD_ARN"
+echo "Test listener: $LISTENER_TEST_ARN"
 ```
 
 ### 6.5 Create CodeDeploy Deployment Group
@@ -560,6 +617,7 @@ aws deploy create-deployment-group \
   --deployment-group-name lks-nusantara-dg \
   --service-role-arn $LAB_ROLE \
   --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
+  --deployment-style "deploymentType=BLUE_GREEN,deploymentOption=WITH_TRAFFIC_CONTROL" \
   --ecs-services "[{\"serviceName\":\"nusantara-shop-svc\",\"clusterName\":\"lks-nusantara-cluster\"}]" \
   --load-balancer-info "{
     \"targetGroupPairInfoList\": [{
@@ -585,92 +643,64 @@ aws deploy create-deployment-group \
   --tags Key=Project,Value=nusantara-shop Key=Environment,Value=production Key=ManagedBy,Value=LKS-Team
 ```
 
-### 6.6 Create CodePipeline
+> **Important:** `--deployment-style "deploymentType=BLUE_GREEN,deploymentOption=WITH_TRAFFIC_CONTROL"` is required. Without it the command fails with `InvalidDeploymentStyleException`.
+
+### 6.6 Register Task Definition and Trigger First Deployment
 
 ```bash
-aws codepipeline create-pipeline \
-  --pipeline "{
-    \"name\": \"lks-nusantara-pipeline\",
-    \"roleArn\": \"$LAB_ROLE\",
-    \"artifactStore\": {
-      \"type\": \"S3\",
-      \"location\": \"$PIPELINE_BUCKET\"
-    },
-    \"stages\": [
-      {
-        \"name\": \"Source\",
-        \"actions\": [{
-          \"name\": \"Source\",
-          \"actionTypeId\": {
-            \"category\": \"Source\",
-            \"owner\": \"AWS\",
-            \"provider\": \"CodeCommit\",
-            \"version\": \"1\"
-          },
-          \"configuration\": {
-            \"RepositoryName\": \"nusantara-shop-app\",
-            \"BranchName\": \"main\",
-            \"PollForSourceChanges\": \"true\"
-          },
-          \"outputArtifacts\": [{\"name\": \"SourceArtifact\"}],
-          \"runOrder\": 1
-        }]
-      },
-      {
-        \"name\": \"Deploy\",
-        \"actions\": [{
-          \"name\": \"Deploy\",
-          \"actionTypeId\": {
-            \"category\": \"Deploy\",
-            \"owner\": \"AWS\",
-            \"provider\": \"CodeDeployToECS\",
-            \"version\": \"1\"
-          },
-          \"configuration\": {
-            \"ApplicationName\": \"lks-nusantara-app\",
-            \"DeploymentGroupName\": \"lks-nusantara-dg\",
-            \"TaskDefinitionTemplateArtifact\": \"SourceArtifact\",
-            \"TaskDefinitionTemplatePath\": \"taskdef.json\",
-            \"AppSpecTemplateArtifact\": \"SourceArtifact\",
-            \"AppSpecTemplatePath\": \"appspec.yaml\",
-            \"Image1ArtifactName\": \"SourceArtifact\",
-            \"Image1ContainerName\": \"IMAGE1_NAME\"
-          },
-          \"inputArtifacts\": [{\"name\": \"SourceArtifact\"}],
-          \"runOrder\": 1
-        }]
-      }
-    ]
-  }" \
-  --tags key=Project,value=nusantara-shop key=Environment,value=production key=ManagedBy,value=LKS-Team
-```
+# Register task def revision
+NEW_TD_ARN=$(aws ecs register-task-definition \
+  --cli-input-json file:///tmp/nusantara-app/taskdef.json \
+  --region us-east-1 \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
 
-### 6.7 Monitor Pipeline Execution
+echo "Task def: $NEW_TD_ARN"
 
-```bash
-# Wait for pipeline to run (triggered by CodeCommit push)
-# Check status every 30 seconds
-watch -n 30 "aws codepipeline get-pipeline-state \
-  --name lks-nusantara-pipeline \
-  --query 'stageStates[*].{Stage:stageName,Status:latestExecution.status}' \
-  --output table"
+# Build appspec content inline
+APPSPEC=$(python3 -c "
+import json, sys
+appspec = {
+    'version': '0.0',
+    'Resources': [{
+        'TargetService': {
+            'Type': 'AWS::ECS::Service',
+            'Properties': {
+                'TaskDefinition': '$NEW_TD_ARN',
+                'LoadBalancerInfo': {
+                    'ContainerName': 'nusantara-shop',
+                    'ContainerPort': 5000
+                }
+            }
+        }
+    }]
+}
+print(json.dumps(appspec))
+")
 
-# Check CodeDeploy deployment
-DEPLOY_ID=$(aws deploy list-deployments \
+# Trigger deployment
+DEPLOY_ID=$(aws deploy create-deployment \
   --application-name lks-nusantara-app \
   --deployment-group-name lks-nusantara-dg \
-  --include-only-statuses InProgress Succeeded Failed \
-  --query 'deployments[0]' --output text)
+  --revision "{\"revisionType\":\"AppSpecContent\",\"appSpecContent\":{\"content\":$(echo $APPSPEC | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}" \
+  --query 'deploymentId' --output text)
 
-aws deploy get-deployment \
+echo "Deployment: $DEPLOY_ID"
+```
+
+### 6.7 Monitor Deployment
+
+```bash
+# Poll until Succeeded or Failed
+watch -n 15 "aws deploy get-deployment \
   --deployment-id $DEPLOY_ID \
-  --query 'deploymentInfo.{Status:status,Msg:description}'
+  --query 'deploymentInfo.{Status:status,Overview:deploymentOverview}' \
+  --output table"
 ```
 
 **Layer 6 checkpoint — verify before continuing:**
-- [ ] `aws codepipeline get-pipeline-state --name lks-nusantara-pipeline --query 'stageStates[1].latestExecution.status'` returns `"Succeeded"`
-- [ ] `aws deploy list-deployments --application-name lks-nusantara-app --include-only-statuses Succeeded` shows at least 1 deployment
-- [ ] `curl http://$ALB_DNS/health` still returns 200
+- [ ] `aws deploy get-deployment --deployment-id $DEPLOY_ID --query 'deploymentInfo.status'` returns `"Succeeded"`
+- [ ] `aws elbv2 describe-target-health --target-group-arn $TG_GREEN_ARN --query 'TargetHealthDescriptions[*].TargetHealth.State'` shows `"healthy"`
+- [ ] `curl http://$ALB_DNS/health` returns `{"status":"ok","redis":"connected"}`
 
 ---
 
@@ -697,26 +727,82 @@ aws ecr get-login-password --region us-east-1 | \
 docker push $ECR_URI:2.0.0
 ```
 
-### 7.2 Update Pipeline Files and Trigger Deployment
+### 7.2 Register New Task Definition and Trigger Deployment
 
 ```bash
-cd /tmp/nusantara-app
+REDIS_ENDPOINT=$(aws ssm get-parameter --name /nusantara-shop/redis-host \
+  --query 'Parameter.Value' --output text)
 
-# Update imageDetail.json with v2.0.0
-cat > imageDetail.json << EOF
-{
-  "ImageURI": "$ECR_URI:2.0.0"
+# Register v2.0.0 task definition
+NEW_TD_ARN=$(aws ecs register-task-definition \
+  --family nusantara-shop \
+  --network-mode awsvpc \
+  --requires-compatibilities FARGATE \
+  --cpu 256 \
+  --memory 512 \
+  --execution-role-arn $LAB_ROLE \
+  --task-role-arn $LAB_ROLE \
+  --container-definitions "[
+    {
+      \"name\": \"nusantara-shop\",
+      \"image\": \"$ECR_URI:2.0.0\",
+      \"portMappings\": [{\"containerPort\": 5000, \"protocol\": \"tcp\"}],
+      \"environment\": [
+        {\"name\": \"APP_VERSION\", \"value\": \"2.0.0\"},
+        {\"name\": \"APP_COLOR\", \"value\": \"green\"},
+        {\"name\": \"REDIS_HOST\", \"value\": \"$REDIS_ENDPOINT\"},
+        {\"name\": \"REDIS_PORT\", \"value\": \"6379\"}
+      ],
+      \"logConfiguration\": {
+        \"logDriver\": \"awslogs\",
+        \"options\": {
+          \"awslogs-group\": \"/ecs/nusantara-shop\",
+          \"awslogs-region\": \"us-east-1\",
+          \"awslogs-stream-prefix\": \"ecs\"
+        }
+      },
+      \"essential\": true,
+      \"healthCheck\": {
+        \"command\": [\"CMD-SHELL\", \"curl -f http://localhost:5000/health || exit 1\"],
+        \"interval\": 30,
+        \"timeout\": 5,
+        \"retries\": 3,
+        \"startPeriod\": 60
+      }
+    }
+  ]" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+
+echo "v2.0.0 task def: $NEW_TD_ARN"
+
+# Trigger Blue/Green deployment
+APPSPEC=$(python3 -c "
+import json
+appspec = {
+    'version': '0.0',
+    'Resources': [{
+        'TargetService': {
+            'Type': 'AWS::ECS::Service',
+            'Properties': {
+                'TaskDefinition': '$NEW_TD_ARN',
+                'LoadBalancerInfo': {
+                    'ContainerName': 'nusantara-shop',
+                    'ContainerPort': 5000
+                }
+            }
+        }
+    }]
 }
-EOF
+print(json.dumps(appspec))
+")
 
-# Update taskdef.json — change version and color
-sed -i 's/"APP_VERSION", "value": "1.0.0"/"APP_VERSION", "value": "2.0.0"/g' taskdef.json
-sed -i 's/"APP_COLOR", "value": "blue"/"APP_COLOR", "value": "green"/g' taskdef.json
-sed -i "s|$ECR_URI:latest|$ECR_URI:2.0.0|g" taskdef.json
+DEPLOY_ID=$(aws deploy create-deployment \
+  --application-name lks-nusantara-app \
+  --deployment-group-name lks-nusantara-dg \
+  --revision "{\"revisionType\":\"AppSpecContent\",\"appSpecContent\":{\"content\":$(echo $APPSPEC | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}" \
+  --query 'deploymentId' --output text)
 
-git add imageDetail.json taskdef.json
-git commit -m "feat: upgrade to v2.0.0 green deployment"
-git push origin main
+echo "Deployment: $DEPLOY_ID"
 ```
 
 ### 7.3 Watch Blue/Green Traffic Shift
@@ -794,12 +880,10 @@ aws ec2 delete-security-group --group-id $ALB_SG_ID
 # 6. Delete ECR repository
 aws ecr delete-repository --repository-name nusantara-shop --force
 
-# 7. Delete S3 buckets
+# 7. Delete S3 bucket
 aws s3 rb s3://$BUCKET_NAME --force
-aws s3 rb s3://$PIPELINE_BUCKET --force
 
-# 8. Delete CodePipeline, CodeDeploy, CodeCommit
-aws codepipeline delete-pipeline --name lks-nusantara-pipeline
+# 8. Delete CodeDeploy and CodeCommit
 aws deploy delete-deployment-group --application-name lks-nusantara-app --deployment-group-name lks-nusantara-dg
 aws deploy delete-application --application-name lks-nusantara-app
 aws codecommit delete-repository --repository-name nusantara-shop-app

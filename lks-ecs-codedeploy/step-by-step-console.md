@@ -18,7 +18,7 @@
 | **3** | ElastiCache Redis + SSM parameter | Status = available |
 | **4** | ECS Fargate + ALB + Target Groups + Service | `curl ALB/health` → `{"status":"ok","redis":"connected"}` |
 | **5** | S3 Static Website (frontend) | Browser opens, products load |
-| **6** | CodeCommit + CodePipeline + CodeDeploy | Pipeline Succeeded |
+| **6** | CodeCommit + CodeDeploy (Blue/Green) | Deployment Succeeded, traffic on green |
 | **7** | Blue/Green demo (v2.0.0) | `/health` returns version 2.0.0 |
 
 ---
@@ -53,7 +53,9 @@ aws ecr get-login-password --region us-east-1 | \
   $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
 
 # Build (from app/ directory)
-docker build -t nusantara-shop:1.0.0 -t nusantara-shop:latest app/
+# --platform linux/amd64 is required on Apple Silicon (M1/M2/M3)
+docker buildx build --platform linux/amd64 \
+  -t nusantara-shop:1.0.0 -t nusantara-shop:latest app/
 
 # Tag and push
 docker tag nusantara-shop:1.0.0 $ECR_URI:1.0.0
@@ -139,7 +141,7 @@ Navigate to **EC2 Console** → **Security Groups** (left panel under Network & 
    - `us-east-1c` → `subnet-07de5176ed29efed0`
 5. Click **Create**
 
-### 3.2 Create Redis Cluster
+### 3.2 Create Redis Replication Group
 
 1. **ElastiCache** → **Redis clusters** → **Create Redis cluster**
 2. **Cluster mode:** Disabled
@@ -151,17 +153,20 @@ Navigate to **EC2 Console** → **Security Groups** (left panel under Network & 
 4. **Subnet group:** `lks-nusantara-redis-subnet`
 5. **Security:** Select `lks-nusantara-redis-sg`
 6. **Engine version:** `7.1`
-7. Expand **Tags** → Add:
+7. **Encryption in transit:** **Disabled** — do not enable TLS
+8. Expand **Tags** → Add:
    - `Project=nusantara-shop`, `Environment=production`, `ManagedBy=LKS-Team`
-8. Click **Create**
+9. Click **Create**
 
 > Wait ~5 minutes for status to change to **available**.
 
 ### 3.3 Copy Redis Endpoint
 
 1. Click on `lks-nusantara-redis` cluster
-2. Copy the **Primary endpoint** (format: `lks-nusantara-redis.xxxxx.cfg.use1.cache.amazonaws.com`)
+2. Copy the **Primary endpoint** (format: `lks-nusantara-redis.xxxxx.ng.0001.use1.cache.amazonaws.com`)
 3. Remove the `:6379` port suffix — copy only the hostname
+
+> **Critical:** Use the primary endpoint in `ng.0001` format exactly as shown. Do NOT use `master.<id>.<suffix>` — that hostname does not exist for ElastiCache replication groups.
 
 ### 3.4 Store Endpoint in SSM Parameter Store
 
@@ -353,27 +358,28 @@ Navigate to **EC2 Console** → **Security Groups** (left panel under Network & 
 ```
 3. Save
 
-### 5.4 Prepare and Upload index.html
+### 5.4 Set ALB URL and Upload index.html
 
-Before uploading, inject the ALB DNS into `index.html`:
+1. Find your ALB DNS name: **EC2** → **Load Balancers** → `lks-nusantara-alb` → copy **DNS name**
 
-```bash
-# Find ALB DNS first
-ALB_DNS=$(aws elbv2 describe-load-balancers --names lks-nusantara-alb \
-  --query 'LoadBalancers[0].DNSName' --output text)
+2. Open `app/static/index.html` in a text editor and find line 78:
+   ```javascript
+   const API = '';
+   ```
+   Replace with your ALB DNS:
+   ```javascript
+   const API = 'http://<YOUR-ALB-DNS-HERE>';
+   ```
+   Save the file.
 
-cp app/static/index.html /tmp/index.html
-sed -i "s|const API = '';|const API = 'http://$ALB_DNS';|g" /tmp/index.html
-```
+3. Upload via CLI:
+   ```bash
+   aws s3 cp app/static/index.html s3://lks-nusantara-frontend-547849081977/index.html \
+     --content-type text/html
+   ```
+   Or via Console: S3 → bucket → **Objects** → **Upload** → choose the modified `index.html` → Upload
 
-Then upload via console or CLI:
-```bash
-aws s3 cp /tmp/index.html s3://lks-nusantara-frontend-547849081977/index.html \
-  --content-type text/html
-```
-
-Or via Console:
-1. S3 → bucket → **Objects** → **Upload** → Add file → choose modified `index.html` → Upload
+> The `index.html` source file keeps `const API = ''` as a placeholder. You must set the real ALB URL before uploading — the S3 page cannot reach the API without it.
 
 ### 5.5 Find Website URL
 
@@ -387,17 +393,11 @@ Or via Console:
 
 ---
 
-## Layer 6 — CodeCommit + CodePipeline + CodeDeploy
+## Layer 6 — CodeCommit + CodeDeploy (Blue/Green)
 
-### 6.1 Create S3 Artifact Bucket
+> **Note:** CodePipeline requires `codepipeline.amazonaws.com` in the IAM role trust policy. LabRole (AWS Academy) does not include it. This layer uses CodeDeploy directly instead.
 
-1. S3 Console → **Create bucket**
-2. **Name:** `lks-nusantara-pipeline-547849081977`, **Region:** us-east-1
-3. Leave **Block Public Access** enabled
-4. Enable **Versioning**: Bucket → Properties → Versioning → Enable
-5. Create bucket
-
-### 6.2 Create CodeCommit Repository
+### 6.1 Create CodeCommit Repository
 
 1. Open **CodeCommit Console** → **Repositories** → **Create repository**
 2. Fill:
@@ -405,45 +405,44 @@ Or via Console:
    - **Description:** `NusantaraShop CI/CD source`
 3. **Tags:** `Project=nusantara-shop`
 4. Click **Create**
-5. Copy the **HTTPS clone URL** (format: `https://git-codecommit.us-east-1.amazonaws.com/v1/repos/nusantara-shop-app`)
+5. Copy the **HTTPS clone URL**
 
-### 6.3 Push Pipeline Files to CodeCommit
+### 6.2 Push Deployment Files to CodeCommit
 
 ```bash
 # Configure git credentials helper (one time)
 git config --global credential.helper '!aws codecommit credential-helper $@'
 git config --global credential.UseHttpPath true
 
-# Clone repo
 git clone https://git-codecommit.us-east-1.amazonaws.com/v1/repos/nusantara-shop-app /tmp/nusantara-app
 cd /tmp/nusantara-app
 git checkout -b main
 
-# Get current values
 ECR_URI="547849081977.dkr.ecr.us-east-1.amazonaws.com/nusantara-shop"
 REDIS_ENDPOINT=$(aws ssm get-parameter --name /nusantara-shop/redis-host \
   --query 'Parameter.Value' --output text)
+LAB_ROLE="arn:aws:iam::547849081977:role/LabRole"
 
-# Copy and update appspec.yaml
 cp /path/to/lks-ecs-codedeploy/pipeline/appspec.yaml .
 
-# Create taskdef.json with real values
-cat > taskdef.json << 'TASKDEF'
+cat > taskdef.json << EOF
 {
   "family": "nusantara-shop",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::547849081977:role/LabRole",
-  "taskRoleArn": "arn:aws:iam::547849081977:role/LabRole",
+  "executionRoleArn": "$LAB_ROLE",
+  "taskRoleArn": "$LAB_ROLE",
   "containerDefinitions": [{
     "name": "nusantara-shop",
-    "image": "<IMAGE1_NAME>",
+    "image": "$ECR_URI:latest",
     "portMappings": [{"containerPort": 5000, "protocol": "tcp"}],
     "environment": [
       {"name": "APP_VERSION", "value": "1.0.0"},
-      {"name": "APP_COLOR", "value": "blue"}
+      {"name": "APP_COLOR", "value": "blue"},
+      {"name": "REDIS_HOST", "value": "$REDIS_ENDPOINT"},
+      {"name": "REDIS_PORT", "value": "6379"}
     ],
     "logConfiguration": {
       "logDriver": "awslogs",
@@ -453,22 +452,21 @@ cat > taskdef.json << 'TASKDEF'
         "awslogs-stream-prefix": "ecs"
       }
     },
-    "essential": true
+    "essential": true,
+    "healthCheck": {
+      "command": ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"],
+      "interval": 30, "timeout": 5, "retries": 3, "startPeriod": 60
+    }
   }]
 }
-TASKDEF
-
-# Create imageDetail.json with current ECR image
-cat > imageDetail.json << EOF
-{"ImageURI": "$ECR_URI:latest"}
 EOF
 
-git add appspec.yaml taskdef.json imageDetail.json
-git commit -m "feat: initial CI/CD pipeline configuration"
+git add appspec.yaml taskdef.json
+git commit -m "feat: add CodeDeploy deployment files"
 git push origin main
 ```
 
-### 6.4 Create CodeDeploy Application
+### 6.3 Create CodeDeploy Application
 
 1. Open **CodeDeploy Console** → **Applications** → **Create application**
 2. Fill:
@@ -476,7 +474,7 @@ git push origin main
    - **Compute platform:** Amazon ECS
 3. Click **Create application**
 
-### 6.5 Create CodeDeploy Deployment Group
+### 6.4 Create CodeDeploy Deployment Group
 
 1. Click `lks-nusantara-app` → **Deployment groups** → **Create deployment group**
 2. Fill:
@@ -501,46 +499,60 @@ git push origin main
 7. **Tags:** `Project=nusantara-shop`
 8. Click **Create deployment group**
 
-### 6.6 Create CodePipeline
+### 6.5 Trigger First CodeDeploy Deployment (CLI)
 
-1. Open **CodePipeline Console** → **Pipelines** → **Create pipeline**
-2. **Pipeline settings:**
-   - **Pipeline name:** `lks-nusantara-pipeline`
-   - **Service role:** Existing service role → `LabRole`
-   - **Artifact store:** Custom location → S3 bucket → `lks-nusantara-pipeline-547849081977`
-3. Click **Next**
-4. **Source stage:**
-   - **Source provider:** AWS CodeCommit
-   - **Repository:** `nusantara-shop-app`
-   - **Branch:** `main`
-   - **Detection option:** Amazon CloudWatch Events (recommended)
-5. Click **Next**
-6. **Build stage:** Click **Skip build stage** (no CodeBuild in this lab)
-7. **Deploy stage:**
-   - **Deploy provider:** Amazon ECS (Blue/Green)
-   - **Application name:** `lks-nusantara-app`
-   - **Deployment group:** `lks-nusantara-dg`
-   - **Amazon ECS task definition:** SourceArtifact → `taskdef.json`
-   - **AWS CodeDeploy AppSpec file:** SourceArtifact → `appspec.yaml`
-   - **Input artifact with image details:** SourceArtifact → `imageDetail.json`
-   - **Placeholder text in the task definition:** `IMAGE1_NAME`
-8. Click **Next** → **Create pipeline**
+CodeDeploy ECS deployments must be triggered via CLI (console requires an artifact store with a specific format):
 
-### 6.7 Monitor Pipeline
+```bash
+ECR_URI="547849081977.dkr.ecr.us-east-1.amazonaws.com/nusantara-shop"
+LAB_ROLE="arn:aws:iam::547849081977:role/LabRole"
+REDIS_ENDPOINT=$(aws ssm get-parameter --name /nusantara-shop/redis-host \
+  --query 'Parameter.Value' --output text)
 
-1. Pipeline automatically triggers after creation
-2. Watch **Source** stage → wait for **Succeeded**
-3. Watch **Deploy** stage → CodeDeploy Blue/Green deployment starts
-4. Click **Details** link → opens CodeDeploy deployment page
-5. Watch deployment lifecycle:
-   - Create replacement task set (Green tasks start)
-   - Install → Allow test traffic → Reroute production traffic
-   - Terminate original task set (after 5 min wait)
+# Register new task definition revision
+NEW_TD_ARN=$(aws ecs register-task-definition \
+  --cli-input-json file:///tmp/nusantara-app/taskdef.json \
+  --region us-east-1 \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+
+echo "Task def: $NEW_TD_ARN"
+
+# Build appspec and trigger deployment
+APPSPEC=$(python3 -c "
+import json
+appspec = {
+    'version': '0.0',
+    'Resources': [{'TargetService': {'Type': 'AWS::ECS::Service', 'Properties': {
+        'TaskDefinition': '$NEW_TD_ARN',
+        'LoadBalancerInfo': {'ContainerName': 'nusantara-shop', 'ContainerPort': 5000}
+    }}}]
+}
+print(json.dumps(appspec))
+")
+
+DEPLOY_ID=$(aws deploy create-deployment \
+  --application-name lks-nusantara-app \
+  --deployment-group-name lks-nusantara-dg \
+  --revision "{\"revisionType\":\"AppSpecContent\",\"appSpecContent\":{\"content\":$(echo $APPSPEC | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}" \
+  --query 'deploymentId' --output text)
+
+echo "Deployment: $DEPLOY_ID"
+```
+
+### 6.6 Monitor Deployment in Console
+
+1. **CodeDeploy Console** → **Applications** → `lks-nusantara-app` → **Deployments**
+2. Click the deployment ID → watch lifecycle events:
+   - *Create replacement task set* — green tasks launch
+   - *Allow test traffic* — green tasks register to green TG (port 8080)
+   - *Reroute production traffic* — port 80 shifts to green tasks
+   - *Terminate original task set* — old blue tasks stop after 5 min
+3. Status changes to **Succeeded**
 
 **Layer 6 checkpoint — verify before continuing:**
-- [ ] CodePipeline → `lks-nusantara-pipeline` → both stages show **Succeeded** (green checkmark)
 - [ ] CodeDeploy → `lks-nusantara-app` → Deployments → latest shows **Succeeded**
-- [ ] ECS → `nusantara-shop-svc` → still shows 2 running tasks
+- [ ] EC2 → Target Groups → `lks-nusantara-tg-green` → Targets shows 2 healthy IPs
+- [ ] `curl http://<ALB-DNS>/health` returns `{"status":"ok","redis":"connected"}`
 
 ---
 
@@ -562,28 +574,68 @@ aws ecr get-login-password --region us-east-1 | \
 docker push $ECR_URI:2.0.0
 ```
 
-### 7.2 Trigger New Deployment via Console
+### 7.2 Register v2.0.0 Task Definition and Trigger Deployment
 
-1. Go to `/tmp/nusantara-app` (cloned CodeCommit repo)
-2. Update `imageDetail.json`:
-```json
-{"ImageURI": "547849081977.dkr.ecr.us-east-1.amazonaws.com/nusantara-shop:2.0.0"}
-```
-3. Update `taskdef.json` — change:
-   - `"APP_VERSION"` value: `"1.0.0"` → `"2.0.0"`
-   - `"APP_COLOR"` value: `"blue"` → `"green"`
-4. Commit and push:
 ```bash
-git add imageDetail.json taskdef.json
-git commit -m "feat: deploy v2.0.0 green"
-git push origin main
+ECR_URI="547849081977.dkr.ecr.us-east-1.amazonaws.com/nusantara-shop"
+LAB_ROLE="arn:aws:iam::547849081977:role/LabRole"
+REDIS_ENDPOINT=$(aws ssm get-parameter --name /nusantara-shop/redis-host \
+  --query 'Parameter.Value' --output text)
+
+# Register v2.0.0 task definition
+NEW_TD_ARN=$(aws ecs register-task-definition \
+  --family nusantara-shop \
+  --network-mode awsvpc \
+  --requires-compatibilities FARGATE \
+  --cpu 256 --memory 512 \
+  --execution-role-arn $LAB_ROLE \
+  --task-role-arn $LAB_ROLE \
+  --container-definitions "[{
+    \"name\": \"nusantara-shop\",
+    \"image\": \"$ECR_URI:2.0.0\",
+    \"portMappings\": [{\"containerPort\": 5000, \"protocol\": \"tcp\"}],
+    \"environment\": [
+      {\"name\": \"APP_VERSION\", \"value\": \"2.0.0\"},
+      {\"name\": \"APP_COLOR\", \"value\": \"green\"},
+      {\"name\": \"REDIS_HOST\", \"value\": \"$REDIS_ENDPOINT\"},
+      {\"name\": \"REDIS_PORT\", \"value\": \"6379\"}
+    ],
+    \"logConfiguration\": {\"logDriver\": \"awslogs\", \"options\": {
+      \"awslogs-group\": \"/ecs/nusantara-shop\",
+      \"awslogs-region\": \"us-east-1\",
+      \"awslogs-stream-prefix\": \"ecs\"
+    }},
+    \"essential\": true,
+    \"healthCheck\": {\"command\": [\"CMD-SHELL\", \"curl -f http://localhost:5000/health || exit 1\"],
+      \"interval\": 30, \"timeout\": 5, \"retries\": 3, \"startPeriod\": 60}
+  }]" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+
+echo "v2.0.0 task def: $NEW_TD_ARN"
+
+# Trigger Blue/Green deployment
+APPSPEC=$(python3 -c "
+import json
+appspec = {'version': '0.0', 'Resources': [{'TargetService': {'Type': 'AWS::ECS::Service', 'Properties': {
+    'TaskDefinition': '$NEW_TD_ARN',
+    'LoadBalancerInfo': {'ContainerName': 'nusantara-shop', 'ContainerPort': 5000}
+}}}]}
+print(json.dumps(appspec))
+")
+
+DEPLOY_ID=$(aws deploy create-deployment \
+  --application-name lks-nusantara-app \
+  --deployment-group-name lks-nusantara-dg \
+  --revision "{\"revisionType\":\"AppSpecContent\",\"appSpecContent\":{\"content\":$(echo $APPSPEC | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}}" \
+  --query 'deploymentId' --output text)
+
+echo "Deployment: $DEPLOY_ID"
 ```
 
 ### 7.3 Watch Blue/Green in Console
 
-1. **CodePipeline** → `lks-nusantara-pipeline` → watch Deploy stage start
-2. Click **Details** → CodeDeploy deployment page
-3. Watch **Deployment lifecycle events**:
+1. **CodeDeploy** → `lks-nusantara-app` → **Deployments** → click the new deployment ID
+2. Watch **Deployment lifecycle events**:
    - `ApplicationStop` → `BeforeInstall` → `AfterInstall` (Green tasks starting)
    - `AllowTestTraffic` — test on port 8080:
      ```bash
@@ -634,9 +686,8 @@ curl http://$ALB_DNS/health
 7. **EC2** → Target Groups → Delete both `lks-nusantara-tg-blue` and `lks-nusantara-tg-green`
 8. **EC2** → Security Groups → Delete in order: ECS SG → Redis SG → ALB SG (wait 2 min after ALB delete)
 9. **ECR** → Delete `nusantara-shop` repository
-10. **S3** → Empty then delete `lks-nusantara-frontend-547849081977` and `lks-nusantara-pipeline-547849081977`
-11. **CodePipeline** → Delete `lks-nusantara-pipeline`
-12. **CodeDeploy** → Delete deployment group → Delete application
-13. **CodeCommit** → Delete `nusantara-shop-app` repository
+10. **S3** → Empty then delete `lks-nusantara-frontend-547849081977`
+11. **CodeDeploy** → Delete deployment group → Delete application
+12. **CodeCommit** → Delete `nusantara-shop-app` repository
 14. **SSM** → Parameter Store → Delete `/nusantara-shop/redis-host`
 15. **CloudWatch** → Log groups → Delete `/ecs/nusantara-shop`

@@ -6,13 +6,20 @@ from functools import wraps
 
 app = Flask(__name__)
 
+@app.after_request
+def add_cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
 APP_VERSION = os.environ.get('APP_VERSION', '1.0.0')
 APP_COLOR = os.environ.get('APP_COLOR', 'blue')
 
 try:
-    cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_connect_timeout=2)
+    cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_connect_timeout=2, socket_timeout=2)
     cache.ping()
 except Exception:
     cache = None
