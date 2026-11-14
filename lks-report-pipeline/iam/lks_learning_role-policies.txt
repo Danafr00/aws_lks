@@ -1,0 +1,7 @@
+AmazonRDSFullAccess
+AWSLambdaBasicExecutionRole
+AmazonSNSFullAccess
+AWSStepFunctionsFullAccess
+AmazonDynamoDBFullAccess
+AmazonS3FullAccess
+AWSLambdaRole

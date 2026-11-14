@@ -1,0 +1,7 @@
+{
+  "filename": "sales-bad-row.json",
+  "data": [
+    {"item": "Notebook", "qty": 10, "price": 15000},
+    {"item": "Eraser", "qty": -3, "price": 2000}
+  ]
+}

@@ -1,0 +1,5 @@
+build/
+.DS_Store
+__pycache__/
+# private helper scripts (students work through the web console)
+scripts/

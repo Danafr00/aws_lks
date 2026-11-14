@@ -1,0 +1,8 @@
+{
+  "filename": "sales-november.json",
+  "data": [
+    {"item": "Notebook", "qty": 10, "price": 15000},
+    {"item": "Pen", "qty": 25, "price": 3500},
+    {"item": "Ruler", "qty": 5, "price": 5000.5}
+  ]
+}

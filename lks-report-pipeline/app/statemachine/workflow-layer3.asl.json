@@ -1,0 +1,148 @@
+{
+  "Comment": "Layer 3 - validate, choose, process into RDS, notify through SNS",
+  "StartAt": "Init",
+  "States": {
+    "Init": {
+      "Type": "Pass",
+      "Next": "Validate",
+      "Parameters": {
+        "bucket.$": "$.detail.bucket.name",
+        "key.$": "$.detail.object.key",
+        "report_id.$": "States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 1)"
+      }
+    },
+    "Validate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__FN_VALIDATE__",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "valid.$": "$.Payload.valid",
+        "reason.$": "$.Payload.reason",
+        "filename.$": "$.Payload.filename",
+        "record_count.$": "$.Payload.record_count"
+      },
+      "ResultPath": "$.validation",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyError"
+        }
+      ],
+      "Next": "CheckValid"
+    },
+    "CheckValid": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.validation.valid",
+          "BooleanEquals": true,
+          "Next": "Process"
+        }
+      ],
+      "Default": "NotifyInvalid"
+    },
+    "Process": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__FN_PROCESS__",
+        "Payload": {
+          "bucket.$": "$.bucket",
+          "key.$": "$.key",
+          "report_id.$": "$.report_id"
+        }
+      },
+      "ResultSelector": {
+        "record_count.$": "$.Payload.record_count",
+        "total_amount.$": "$.Payload.total_amount"
+      },
+      "ResultPath": "$.result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyError"
+        }
+      ],
+      "Next": "NotifySuccess"
+    },
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "__TOPIC_ARN__",
+        "Subject": "Report processed",
+        "Message.$": "States.Format('Report {} processed: {} records, total {}', $.report_id, $.result.record_count, $.result.total_amount)"
+      },
+      "ResultPath": null,
+      "Next": "Done"
+    },
+    "NotifyInvalid": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "__TOPIC_ARN__",
+        "Subject": "Report rejected",
+        "Message.$": "States.Format('Report {} rejected: {}', $.report_id, $.validation.reason)"
+      },
+      "ResultPath": null,
+      "Next": "ReportRejected"
+    },
+    "NotifyError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "__TOPIC_ARN__",
+        "Subject": "Report processing failed",
+        "Message.$": "States.Format('Report {} failed: {}', $.report_id, $.error.Error)"
+      },
+      "ResultPath": null,
+      "Next": "PipelineFailed"
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "ReportRejected": {
+      "Type": "Succeed"
+    },
+    "PipelineFailed": {
+      "Type": "Fail",
+      "Error": "PipelineError",
+      "Cause": "A step failed, see the notification and the execution history"
+    }
+  }
+}
