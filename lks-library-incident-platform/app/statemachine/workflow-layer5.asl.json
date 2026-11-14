@@ -1,0 +1,343 @@
+{
+  "Comment": "Layer 5 - enrich in Parallel, route by severity, alert HIGH/CRITICAL through SNS",
+  "StartAt": "ValidateFile",
+  "States": {
+    "ValidateFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__FN_VALIDATE__",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "bucket.$": "$.Payload.bucket",
+        "file_key.$": "$.Payload.file_key",
+        "valid.$": "$.Payload.valid",
+        "invalid.$": "$.Payload.invalid"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFileFailed"
+        }
+      ],
+      "Next": "ProcessIncidents"
+    },
+    "ProcessIncidents": {
+      "Type": "Map",
+      "ItemsPath": "$.valid",
+      "MaxConcurrency": 5,
+      "ItemSelector": {
+        "incident.$": "$$.Map.Item.Value",
+        "file_key.$": "$.file_key"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "EnrichIncident",
+        "States": {
+          "EnrichIncident": {
+            "Type": "Parallel",
+            "ResultPath": "$.enrichment",
+            "Next": "MergeEnrichment",
+            "Branches": [
+              {
+                "StartAt": "LookupVisitor",
+                "States": {
+                  "LookupVisitor": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "__FN_LOOKUP__",
+                      "Payload.$": "$.incident"
+                    },
+                    "ResultSelector": {
+                      "visitor.$": "$.Payload.visitor"
+                    },
+                    "Retry": [
+                      {
+                        "ErrorEquals": [
+                          "Lambda.ServiceException",
+                          "Lambda.AWSLambdaException",
+                          "Lambda.SdkClientException",
+                          "Lambda.TooManyRequestsException"
+                        ],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Catch": [
+                      {
+                        "ErrorEquals": [
+                          "States.ALL"
+                        ],
+                        "Next": "VisitorUnknown"
+                      }
+                    ],
+                    "End": true
+                  },
+                  "VisitorUnknown": {
+                    "Type": "Pass",
+                    "Result": {
+                      "visitor": {
+                        "id": 0,
+                        "name": "unknown",
+                        "class": ""
+                      }
+                    },
+                    "End": true
+                  }
+                }
+              },
+              {
+                "StartAt": "ClassifyPriority",
+                "States": {
+                  "ClassifyPriority": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "__FN_CLASSIFY__",
+                      "Payload.$": "$.incident"
+                    },
+                    "ResultSelector": {
+                      "priority.$": "$.Payload.priority",
+                      "sla_minutes.$": "$.Payload.sla_minutes"
+                    },
+                    "Retry": [
+                      {
+                        "ErrorEquals": [
+                          "Lambda.ServiceException",
+                          "Lambda.AWSLambdaException",
+                          "Lambda.SdkClientException",
+                          "Lambda.TooManyRequestsException"
+                        ],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "End": true
+                  }
+                }
+              }
+            ]
+          },
+          "MergeEnrichment": {
+            "Type": "Pass",
+            "Next": "RouteBySeverity",
+            "Parameters": {
+              "incident.$": "$.incident",
+              "file_key.$": "$.file_key",
+              "visitor.$": "$.enrichment[0].visitor",
+              "priority.$": "$.enrichment[1].priority"
+            }
+          },
+          "RouteBySeverity": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.incident.severity",
+                "StringEquals": "HIGH",
+                "Next": "NotifyHigh"
+              },
+              {
+                "Variable": "$.incident.severity",
+                "StringEquals": "CRITICAL",
+                "Next": "NotifyHigh"
+              }
+            ],
+            "Default": "MarkLogged"
+          },
+          "NotifyHigh": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+              "TopicArn": "__TOPIC_ARN__",
+              "Subject": "Library incident alert",
+              "Message.$": "States.Format('{} incident {} in {}: {}', $.incident.severity, $.incident.incident_id, $.incident.room, $.incident.description)"
+            },
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.notify_error",
+                "Next": "MarkNotifyFailed"
+              }
+            ],
+            "Next": "MarkNotified"
+          },
+          "MarkNotified": {
+            "Type": "Pass",
+            "Result": "NOTIFIED",
+            "ResultPath": "$.status",
+            "Next": "SaveIncident"
+          },
+          "MarkNotifyFailed": {
+            "Type": "Pass",
+            "Result": "NOTIFY_FAILED",
+            "ResultPath": "$.status",
+            "Next": "SaveIncident"
+          },
+          "MarkLogged": {
+            "Type": "Pass",
+            "Result": "LOGGED",
+            "ResultPath": "$.status",
+            "Next": "SaveIncident"
+          },
+          "SaveIncident": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+              "TableName": "__T_INCIDENTS__",
+              "Item": {
+                "incident_id": {
+                  "S.$": "$.incident.incident_id"
+                },
+                "severity": {
+                  "S.$": "$.incident.severity"
+                },
+                "type": {
+                  "S.$": "$.incident.type"
+                },
+                "room": {
+                  "S.$": "$.incident.room"
+                },
+                "description": {
+                  "S.$": "$.incident.description"
+                },
+                "received_at": {
+                  "S.$": "$.incident.received_at"
+                },
+                "report_date": {
+                  "S.$": "$.incident.report_date"
+                },
+                "file_key": {
+                  "S.$": "$.file_key"
+                },
+                "status": {
+                  "S.$": "$.status"
+                },
+                "visitor_name": {
+                  "S.$": "$.visitor.name"
+                },
+                "priority": {
+                  "N.$": "States.Format('{}', $.priority)"
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.error",
+                "Next": "SendToFailedQueue"
+              }
+            ],
+            "ResultPath": "$.save",
+            "End": true
+          },
+          "SendToFailedQueue": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sqs:sendMessage",
+            "Parameters": {
+              "QueueUrl": "__FAILED_QUEUE_URL__",
+              "MessageBody.$": "States.JsonToString($)"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.results",
+      "Next": "FinishFile"
+    },
+    "FinishFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "__T_FILES__",
+        "Key": {
+          "file_key": {
+            "S.$": "$.file_key"
+          }
+        },
+        "UpdateExpression": "SET #s = :s, processed_count = :p, invalid_count = :i",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":s": {
+            "S": "DONE"
+          },
+          ":p": {
+            "N.$": "States.Format('{}', States.ArrayLength($.results))"
+          },
+          ":i": {
+            "N.$": "States.Format('{}', States.ArrayLength($.invalid))"
+          }
+        }
+      },
+      "End": true
+    },
+    "MarkFileFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "__T_FILES__",
+        "Key": {
+          "file_key": {
+            "S.$": "$.file_key"
+          }
+        },
+        "UpdateExpression": "SET #s = :s, error_type = :e",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":s": {
+            "S": "FAILED"
+          },
+          ":e": {
+            "S.$": "$.error.Error"
+          }
+        }
+      },
+      "Next": "FileFailed"
+    },
+    "FileFailed": {
+      "Type": "Fail",
+      "Error": "FileProcessingFailed",
+      "Cause": "The file could not be validated, see the files table"
+    }
+  }
+}

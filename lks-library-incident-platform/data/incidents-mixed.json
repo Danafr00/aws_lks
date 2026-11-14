@@ -1,0 +1,9 @@
+{
+  "report_id": "rpt-003",
+  "incidents": [
+    {"incident_id": "inc-3001", "type": "facility", "severity": "MEDIUM", "room": "Toilet 1", "description": "Water leak"},
+    {"incident_id": "inc-3002", "severity": "URGENT", "description": "Unknown severity value"},
+    {"severity": "LOW", "description": "No incident id"},
+    {"incident_id": "inc-3004", "type": "security", "severity": "HIGH", "room": "Parking", "description": "Suspicious person near bicycles"}
+  ]
+}

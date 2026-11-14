@@ -1,0 +1,9 @@
+{
+  "report_id": "rpt-001",
+  "reported_by": "librarian-1",
+  "incidents": [
+    {"incident_id": "inc-1001", "type": "damaged_book", "severity": "LOW", "room": "Reading Room A", "description": "Torn cover on a physics textbook"},
+    {"incident_id": "inc-1002", "type": "noise", "severity": "MEDIUM", "room": "Reading Room B", "description": "Group discussion too loud"},
+    {"incident_id": "inc-1003", "type": "lost_item", "severity": "HIGH", "room": "Lobby", "description": "Laptop left unattended", "visitor_id": 1}
+  ]
+}

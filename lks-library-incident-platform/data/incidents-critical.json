@@ -1,0 +1,7 @@
+{
+  "report_id": "rpt-002",
+  "reported_by": "security-1",
+  "incidents": [
+    {"incident_id": "inc-2001", "type": "security", "severity": "CRITICAL", "room": "Server Room", "description": "Door found open after closing time"}
+  ]
+}

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library Visitor &amp; Incident Platform</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 880px; margin: 24px auto; padding: 0 16px; color: #1f2933; }
+  h1 { font-size: 1.4rem; }
+  nav button { padding: 8px 14px; border: 1px solid #9aa5b1; background: #fff; cursor: pointer; }
+  nav button.active { background: #1f2933; color: #fff; }
+  section { display: none; margin-top: 16px; }
+  section.active { display: block; }
+  label { display: block; margin: 10px 0 4px; font-weight: 600; }
+  input, textarea, select { width: 100%; padding: 8px; box-sizing: border-box; }
+  textarea { height: 220px; font-family: monospace; }
+  button.action { margin-top: 12px; padding: 8px 16px; cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 0.9rem; }
+  th, td { border: 1px solid #cbd2d9; padding: 6px 8px; text-align: left; vertical-align: top; }
+  .msg { margin-top: 10px; font-weight: 600; }
+  .ok { color: #137333; } .err { color: #b3261e; }
+  .sev-CRITICAL { color: #b3261e; font-weight: 700; } .sev-HIGH { color: #c15f00; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Library Visitor &amp; Incident Platform</h1>
+
+<nav>
+  <button data-tab="visitor" class="active">Visitor check-in</button>
+  <button data-tab="incident">Report incidents</button>
+  <button data-tab="dashboard">Dashboard</button>
+</nav>
+
+<section id="visitor" class="active">
+  <label for="name">Name</label><input id="name">
+  <label for="class">Class</label><input id="class" placeholder="XII RPL 1">
+  <label for="purpose">Purpose</label><input id="purpose" placeholder="Reading">
+  <button class="action" id="visitorBtn">Check in</button>
+  <div class="msg" id="visitorMsg"></div>
+</section>
+
+<section id="incident">
+  <p>Paste a JSON file with an <code>incidents</code> array, or choose a file. It is uploaded straight to S3.</p>
+  <input type="file" id="incidentFile" accept=".json,application/json">
+  <label for="incidentText">or paste JSON</label>
+  <textarea id="incidentText">{
+  "report_id": "rpt-web",
+  "incidents": [
+    {"incident_id": "web-001", "type": "damaged_book", "severity": "LOW", "room": "Reading Room A", "description": "Torn cover"},
+    {"incident_id": "web-002", "type": "security", "severity": "CRITICAL", "room": "Server Room", "description": "Door open after closing"}
+  ]
+}</textarea>
+  <button class="action" id="incidentBtn">Upload</button>
+  <div class="msg" id="incidentMsg"></div>
+</section>
+
+<section id="dashboard">
+  <button class="action" id="refreshBtn">Refresh</button>
+
+  <h3>Pending approvals (CRITICAL incidents)</h3>
+  <div id="approvals">-</div>
+
+  <h3>Summary</h3>
+  <div id="summary">-</div>
+
+  <h3>Incidents</h3>
+  <label for="severityFilter">Filter by severity</label>
+  <select id="severityFilter">
+    <option value="">All</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option>
+  </select>
+  <div id="incidents">-</div>
+</section>
+
+<script>
+const API = "__API_GATEWAY_URL__";
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function show(el, text, ok) { el.textContent = text; el.className = "msg " + (ok ? "ok" : "err"); }
+
+document.querySelectorAll("nav button").forEach((btn) => btn.addEventListener("click", () => {
+  document.querySelectorAll("nav button, section").forEach((e) => e.classList.remove("active"));
+  btn.classList.add("active");
+  $(btn.dataset.tab).classList.add("active");
+  if (btn.dataset.tab === "dashboard") loadDashboard();
+}));
+
+$("visitorBtn").addEventListener("click", async () => {
+  try {
+    const res = await fetch(API + "/visitor", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: $("name").value, class: $("class").value, purpose: $("purpose").value }),
+    });
+    const data = await res.json();
+    show($("visitorMsg"), res.ok ? `${data.message} (id ${data.visitor_id})` : data.message, res.ok);
+  } catch (e) { show($("visitorMsg"), "Request failed: " + e.message, false); }
+});
+
+$("incidentFile").addEventListener("change", async (e) => {
+  if (e.target.files[0]) $("incidentText").value = await e.target.files[0].text();
+});
+
+$("incidentBtn").addEventListener("click", async () => {
+  try {
+    const first = await fetch(API + "/upload-url");           // 1) ask the API for a presigned URL
+    const { upload_url, key } = await first.json();
+    const put = await fetch(upload_url, {                      // 2) PUT the file straight to S3
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: $("incidentText").value,
+    });
+    show($("incidentMsg"), put.ok ? `Uploaded as ${key}. Processing starts automatically.` : `S3 answered ${put.status}`, put.ok);
+  } catch (e) { show($("incidentMsg"), "Upload failed: " + e.message, false); }
+});
+
+async function decide(id, decision) {
+  const res = await fetch(API + "/approval", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, decision }),
+  });
+  alert((await res.json()).message);
+  loadDashboard();
+}
+window.decide = decide;
+
+async function loadDashboard() {
+  const [approvals, summary, incidents] = await Promise.all([
+    fetch(API + "/approvals").then((r) => r.json()),
+    fetch(API + "/summary").then((r) => r.json()),
+    fetch(API + "/incidents" + ($("severityFilter").value ? "?severity=" + $("severityFilter").value : "")).then((r) => r.json()),
+  ]);
+
+  $("approvals").innerHTML = approvals.length
+    ? "<table><tr><th>Incident</th><th>Room</th><th>Description</th><th></th></tr>" + approvals.map((a) =>
+        `<tr><td>${esc(a.incident_id)}</td><td>${esc(a.room)}</td><td>${esc(a.description)}</td>
+         <td><button onclick="decide('${esc(a.approval_id)}','APPROVE')">Approve</button>
+             <button onclick="decide('${esc(a.approval_id)}','REJECT')">Reject</button></td></tr>`).join("") + "</table>"
+    : "No pending approvals.";
+
+  $("summary").innerHTML = `Visitors today: <b>${esc(summary.visitors_today)}</b>` +
+    "<table><tr><th>Date</th><th>Visitors</th><th>Incidents</th><th>Critical</th></tr>" +
+    summary.last_days.map((d) => `<tr><td>${esc(d.report_date)}</td><td>${esc(d.total_visitors)}</td><td>${esc(d.total_incidents)}</td><td>${esc(d.critical_incidents)}</td></tr>`).join("") + "</table>";
+
+  $("incidents").innerHTML = incidents.length
+    ? "<table><tr><th>ID</th><th>Severity</th><th>Status</th><th>Room</th><th>Visitor</th><th>Description</th></tr>" + incidents.map((i) =>
+        `<tr><td>${esc(i.incident_id)}</td><td class="sev-${esc(i.severity)}">${esc(i.severity)}</td><td>${esc(i.status)}</td>
+         <td>${esc(i.room)}</td><td>${esc(i.visitor_name)}</td><td>${esc(i.description)}</td></tr>`).join("") + "</table>"
+    : "No incidents yet.";
+}
+$("refreshBtn").addEventListener("click", loadDashboard);
+$("severityFilter").addEventListener("change", loadDashboard);
+</script>
+</body>
+</html>

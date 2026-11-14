@@ -1,0 +1,192 @@
+{
+  "Comment": "Layer 4 - validate the file, process each incident with a Map state",
+  "StartAt": "ValidateFile",
+  "States": {
+    "ValidateFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__FN_VALIDATE__",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "bucket.$": "$.Payload.bucket",
+        "file_key.$": "$.Payload.file_key",
+        "valid.$": "$.Payload.valid",
+        "invalid.$": "$.Payload.invalid"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFileFailed"
+        }
+      ],
+      "Next": "ProcessIncidents"
+    },
+    "ProcessIncidents": {
+      "Type": "Map",
+      "ItemsPath": "$.valid",
+      "MaxConcurrency": 5,
+      "ItemSelector": {
+        "incident.$": "$$.Map.Item.Value",
+        "file_key.$": "$.file_key"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "MarkLogged",
+        "States": {
+          "MarkLogged": {
+            "Type": "Pass",
+            "Result": "LOGGED",
+            "ResultPath": "$.status",
+            "Next": "SaveIncident"
+          },
+          "SaveIncident": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+              "TableName": "__T_INCIDENTS__",
+              "Item": {
+                "incident_id": {
+                  "S.$": "$.incident.incident_id"
+                },
+                "severity": {
+                  "S.$": "$.incident.severity"
+                },
+                "type": {
+                  "S.$": "$.incident.type"
+                },
+                "room": {
+                  "S.$": "$.incident.room"
+                },
+                "description": {
+                  "S.$": "$.incident.description"
+                },
+                "received_at": {
+                  "S.$": "$.incident.received_at"
+                },
+                "report_date": {
+                  "S.$": "$.incident.report_date"
+                },
+                "file_key": {
+                  "S.$": "$.file_key"
+                },
+                "status": {
+                  "S.$": "$.status"
+                }
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.error",
+                "Next": "SendToFailedQueue"
+              }
+            ],
+            "ResultPath": "$.save",
+            "End": true
+          },
+          "SendToFailedQueue": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sqs:sendMessage",
+            "Parameters": {
+              "QueueUrl": "__FAILED_QUEUE_URL__",
+              "MessageBody.$": "States.JsonToString($)"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.results",
+      "Next": "FinishFile"
+    },
+    "FinishFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "__T_FILES__",
+        "Key": {
+          "file_key": {
+            "S.$": "$.file_key"
+          }
+        },
+        "UpdateExpression": "SET #s = :s, processed_count = :p, invalid_count = :i",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":s": {
+            "S": "DONE"
+          },
+          ":p": {
+            "N.$": "States.Format('{}', States.ArrayLength($.results))"
+          },
+          ":i": {
+            "N.$": "States.Format('{}', States.ArrayLength($.invalid))"
+          }
+        }
+      },
+      "End": true
+    },
+    "MarkFileFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "__T_FILES__",
+        "Key": {
+          "file_key": {
+            "S.$": "$.file_key"
+          }
+        },
+        "UpdateExpression": "SET #s = :s, error_type = :e",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":s": {
+            "S": "FAILED"
+          },
+          ":e": {
+            "S.$": "$.error.Error"
+          }
+        }
+      },
+      "Next": "FileFailed"
+    },
+    "FileFailed": {
+      "Type": "Fail",
+      "Error": "FileProcessingFailed",
+      "Cause": "The file could not be validated, see the files table"
+    }
+  }
+}

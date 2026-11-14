@@ -1,0 +1,17 @@
+CREATE TABLE IF NOT EXISTS visitors (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    class VARCHAR(20) NOT NULL,
+    purpose VARCHAR(255) NOT NULL,
+    visit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS daily_summary (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    report_date DATE NOT NULL,
+    total_visitors INT NOT NULL DEFAULT 0,
+    total_incidents INT NOT NULL DEFAULT 0,
+    critical_incidents INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date)
+);
