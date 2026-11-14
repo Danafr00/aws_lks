@@ -145,17 +145,15 @@ incident-input-bucket
 incident-logs
 ```
 
+S3 bucket names are global across all AWS accounts, so these exact names are probably taken. Add a unique suffix, for example `incident-input-bucket-<yourname>` and `incident-logs-<yourname>`, and use the same names everywhere below (Lambda environment variable, `log.py`, EventBridge rule).
+
 Enable:
 
 ```
 Send notifications to EventBridge
 ```
 
-**Disable Block Public Access** on `incident-input-bucket`:
-
-```
-S3 → incident-input-bucket → Permissions → Block public access → Edit → Uncheck all → Save
-```
+Leave **Block Public Access** turned on. Browser uploads use a presigned URL, which carries the permission of the Lambda role, so the bucket does not need to be public and no bucket policy is needed. A policy with `Principal: "*"` is rejected while Block Public Access is on.
 
 **Add CORS policy** on `incident-input-bucket`:
 
@@ -169,12 +167,14 @@ Paste:
 [
   {
     "AllowedHeaders": ["*"],
-    "AllowedMethods": ["PUT", "OPTIONS"],
+    "AllowedMethods": ["PUT"],
     "AllowedOrigins": ["*"],
     "ExposeHeaders": []
   }
 ]
 ```
+
+`OPTIONS` is not a valid value for `AllowedMethods` in S3 CORS (only GET, PUT, POST, DELETE, HEAD). S3 answers the browser preflight automatically once `PUT` is allowed.
 
 ---
 
@@ -198,7 +198,15 @@ Partition key: id
 
 Upload all scripts
 
-Add IAM permissions:
+Set environment variables (no trailing spaces in the values):
+
+| Lambda | Variable | Value |
+|---|---|---|
+| `generate_url` | `bucket_incident` | your input bucket name |
+
+Also replace the placeholders in the code: `LOG_BUCKET` in `log.py` and `TOPIC_ARN` in `alert.py`.
+
+Add IAM permissions to the role of each Lambda. A role that has only `AWSLambdaBasicExecutionRole` cannot sign a working upload URL: S3 checks the signing role when the `PUT` arrives and returns `403 AccessDenied`.
 
 ```
 S3FullAccess
@@ -238,6 +246,8 @@ DynamoDBFullAccess
 ```
 GET /generate-url
 ```
+
+* The invoke URL the frontend calls is `https://<api-id>.execute-api.<region>.amazonaws.com/<stage-name>/generate-url`. Include the stage name (for example `prod`) and the `/generate-url` path. Calling the stage root returns `404`.
 
 * Integration:
 
@@ -284,6 +294,8 @@ Target:
 Step Functions
 ```
 
+Create the rule on the `default` event bus. Events from AWS services such as S3 arrive on the default bus, so a custom event bus is not needed.
+
 Create a new IAM role for EventBridge with permission to start the state machine:
 
 ```json
@@ -294,7 +306,20 @@ Create a new IAM role for EventBridge with permission to start the state machine
 }
 ```
 
-Attach this role to the EventBridge rule target.
+The trust policy of this role must allow `events.amazonaws.com`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "events.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+```
+
+Attach this role to the EventBridge rule target. Wildcards are not accepted in `Principal.Service`, so list each service name. A trust policy that only allows `lambda.amazonaws.com` makes every invocation fail (`FailedInvocations` in the rule metrics) and no execution starts.
 
 ---
 
@@ -334,8 +359,13 @@ Upload file
 * Wrong bucket name in rule
 * Lambda missing permissions
 * Invalid JSON format
-* CORS error on S3 PUT — presigned URL uses wrong endpoint: make sure `generate_url.py` uses `signature_version='s3v4'` and the correct `region_name`, otherwise boto3 generates a SigV2 URL pointing to `s3.amazonaws.com` instead of the regional endpoint and the browser preflight fails
+* CORS error on S3 PUT, `307 Temporary Redirect` — presigned URL uses the global host `<bucket>.s3.amazonaws.com`: set `endpoint_url='https://s3.<region>.amazonaws.com'` and `addressing_style='virtual'` on the boto3 client in `generate_url.py`, along with `signature_version='s3v4'` and the correct `region_name`. Browsers do not follow redirects on the preflight request. The URL host must be `<bucket>.s3.<region>.amazonaws.com`.
 * CORS error on S3 PUT — missing S3 CORS policy: add the CORS config to `incident-input-bucket` as shown in Step 1
+* `403 Forbidden` on the S3 PUT even though CORS headers are present — the Lambda role that signed the URL has no `s3:PutObject`
+* `500` from API Gateway — read the Lambda log in CloudWatch. Typical causes: `os.environ(...)` instead of `os.environ[...]`, a missing `import os`, or a trailing space in the `bucket_incident` value
+* `404` from the frontend call — the `API_URL` still contains the placeholder, or lacks the stage name and `/generate-url`
+* EventBridge rule shows invocations but Step Functions has no executions — check `FailedInvocations`; the target role trust policy needs `events.amazonaws.com`
+* `Invalid bucket name` — the bucket name has a trailing space or uses a name that someone else already owns
 
 ---
 
