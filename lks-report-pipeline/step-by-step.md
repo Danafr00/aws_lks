@@ -218,7 +218,7 @@ Console: **SNS → Topics → Create topic**: type **Standard**, name `lks-rp-al
 
 Both use the role `lks_learning_role`.
 
-> **Note**: `validate` reads the file from S3 and checks the rules of the README. A bad file is **not** an error for the Lambda: it answers `valid: false` with a `reason`, and it always returns the same four keys, because the state machine reads them with fixed paths. A crash would be retried and would end in a failed execution, but a wrong file is a normal business result. `process-report` reads the file again (the state machine passes only the file name, never the content, to keep the data small), counts the rows, sums `qty × price` and writes one row with `INSERT … ON DUPLICATE KEY UPDATE`.
+> **Note**: `validate` reads the file from S3 and checks the rules of the README. A bad file is **not** an error for the Lambda: it answers `valid: false` with a `reason`, and it always returns the same five keys (`valid`, `reason`, `filename`, `record_count`, `etag`), because the state machine reads them with fixed paths. The `etag` is a fingerprint of the exact file that was checked. A crash would be retried and would end in a failed execution, but a wrong file is a normal business result. `process-report` reads the file again (the state machine passes only the file name and the `etag`, never the content, to keep the data small). It reads with `IfMatch=etag`: if somebody replaced the file after the check (the upload address stays valid for 5 minutes), S3 refuses with `PreconditionFailed`, the `Catch` ends the run as an error, and unchecked data is never processed. It then counts the rows, sums `qty × price` and writes one row with `INSERT … ON DUPLICATE KEY UPDATE`.
 
 ### Step 3: Create the state machine
 

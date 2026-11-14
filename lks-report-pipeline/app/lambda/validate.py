@@ -32,14 +32,16 @@ def lambda_handler(event, context):
     # event = {"bucket": ..., "key": ..., "report_id": ...} (built by the Init state)
     obj = s3.get_object(Bucket=event["bucket"], Key=event["key"])
     if obj["ContentLength"] > MAX_BYTES:
-        return {"valid": False, "reason": "file is larger than 1 MB", "filename": "", "record_count": 0}
+        return {"valid": False, "reason": "file is larger than 1 MB", "filename": "", "record_count": 0, "etag": ""}
     try:
         report = json.loads(obj["Body"].read())
     except ValueError:
-        return {"valid": False, "reason": "file is not valid JSON", "filename": "", "record_count": 0}
+        return {"valid": False, "reason": "file is not valid JSON", "filename": "", "record_count": 0, "etag": ""}
 
     reason = check(report)
     if reason:
-        return {"valid": False, "reason": reason, "filename": "", "record_count": 0}
-    # always return the same keys: the state machine reads them with fixed paths
-    return {"valid": True, "reason": "", "filename": str(report["filename"])[:200], "record_count": len(report["data"])}
+        return {"valid": False, "reason": reason, "filename": "", "record_count": 0, "etag": ""}
+    # always return the same keys: the state machine reads them with fixed paths.
+    # The ETag identifies exactly the bytes that were checked; process_report must read that same version.
+    return {"valid": True, "reason": "", "filename": str(report["filename"])[:200],
+            "record_count": len(report["data"]), "etag": obj["ETag"]}

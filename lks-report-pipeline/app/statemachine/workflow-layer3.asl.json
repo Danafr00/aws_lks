@@ -22,7 +22,8 @@
         "valid.$": "$.Payload.valid",
         "reason.$": "$.Payload.reason",
         "filename.$": "$.Payload.filename",
-        "record_count.$": "$.Payload.record_count"
+        "record_count.$": "$.Payload.record_count",
+        "etag.$": "$.Payload.etag"
       },
       "ResultPath": "$.validation",
       "Retry": [
@@ -68,7 +69,8 @@
         "Payload": {
           "bucket.$": "$.bucket",
           "key.$": "$.key",
-          "report_id.$": "$.report_id"
+          "report_id.$": "$.report_id",
+          "etag.$": "$.validation.etag"
         }
       },
       "ResultSelector": {

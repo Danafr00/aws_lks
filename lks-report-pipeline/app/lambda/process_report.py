@@ -8,8 +8,10 @@ s3 = boto3.client("s3")
 
 
 def lambda_handler(event, context):
-    # event = {"bucket": ..., "key": ..., "report_id": ...}; the file was already validated
-    report = json.loads(s3.get_object(Bucket=event["bucket"], Key=event["key"])["Body"].read())
+    # event = {"bucket": ..., "key": ..., "report_id": ..., "etag": ...}; the file was already validated.
+    # IfMatch makes S3 refuse (412) when the file was replaced after validation, so only checked data is processed.
+    obj = s3.get_object(Bucket=event["bucket"], Key=event["key"], IfMatch=event["etag"])
+    report = json.loads(obj["Body"].read())
     rows = report["data"]
     record_count = len(rows)
     total_amount = round(sum(row["qty"] * row["price"] for row in rows), 2)

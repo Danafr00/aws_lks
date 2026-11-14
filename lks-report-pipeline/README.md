@@ -132,7 +132,7 @@ A report is **valid** when it is a JSON object with `filename` and a non-empty `
 |---|---|---|
 | `get-upload-url` | API `GET /upload-url` | Presigned PUT URL for `incoming/<id>.json` |
 | `validate` | Step Functions | Read the file and check the rules; never crash on a bad file, answer `valid: false` with a reason |
-| `process-report` | Step Functions | Count rows, sum the amount, insert or update the row in RDS |
+| `process-report` | Step Functions | Read exactly the version that was validated (`IfMatch` with the ETag from `validate`), count rows, sum the amount, insert or update the row in RDS |
 | `get-reports` | API `GET /reports` | Latest 50 rows from RDS |
 | `get-report-status` | API `GET /reports/{id}` | Status item from DynamoDB (404 when missing) |
 
@@ -156,7 +156,8 @@ Rule on the `default` event bus for `Object Created` events of your bucket under
 
 ## Known Limits (practice only)
 
-- **The API has no authentication.** Anyone who knows the address can list reports and ask for an upload URL.
+- **The API has no authentication.** Anyone who knows the address can list reports and ask for an upload URL. In production put an authorizer (Cognito, JWT or IAM) in front of the API and record who uploaded each report.
+- **The 1 MB limit is checked after the upload.** A presigned `PUT` cannot limit the size, so a larger file is stored in S3 first and rejected afterwards. In production use a presigned `POST` with a `content-length-range` condition. The S3 CORS rule also allows any origin; limit it to your dashboard's address once you know it.
 - **The database is open to the internet on port 3306**, and the shared role uses full-access policies.
 - **Text from uploaded files is untrusted.** The dashboard escapes it before showing it. Keep doing that for every output you add.
 
