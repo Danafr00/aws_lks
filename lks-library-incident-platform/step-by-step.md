@@ -30,6 +30,7 @@ You build it in 8 layers. Each layer adds one idea and ends with a **checkpoint*
 
 > **Note**: One role is shared by Lambda, Step Functions, EventBridge Scheduler and AWS Backup. It already trusts those five services and holds the permissions this module needs (the exact JSON is in the *Instructor appendix* at the end).
 
+- **Get the module files onto your computer**: you need the `app/lambda/` code files, the `app/statemachine/` JSON files, `app/frontend/index.html` and the `data/` sample files. They are all in this folder of the repository (download the repository as a zip, or clone it).
 - **CloudShell** (the `>_` icon at the top of the console) is a ready-made terminal in the same region. You will use it for a few commands (`curl`, building one zip). Anywhere below that says `$API`, first run `API=https://<your-api-id>.execute-api.ap-southeast-1.amazonaws.com` in CloudShell, using the invoke URL of **your** API (layer 1).
 
 ---
@@ -245,9 +246,9 @@ Console: **DynamoDB → Create table**: name `lks-libinc-files-<suffix>`, partit
 
 ### Step 4: Create the Lambda `dispatcher`
 
-Create the function (name `lks-libinc-dispatcher-<suffix>`, role `lks_learning_role`, no layer), with the code of `app/lambda/dispatcher.py`. Environment variables: `FILES_TABLE` = your files table name and `STATE_MACHINE_ARN` = *empty* (add the variable with an empty value, or leave it out). Timeout **30 sec**.
+Create the function (name `lks-libinc-dispatcher-<suffix>`, role `lks_learning_role`, no layer), with the code of `app/lambda/dispatcher.py`. Environment variables: only `FILES_TABLE` = your files table name. **Do not add `STATE_MACHINE_ARN` yet.** Timeout **30 sec**.
 
-> **Note**: `STATE_MACHINE_ARN` is empty on purpose: the state machine does not exist yet (layer 4). Until then the function only *claims* the file and logs it, which is enough to test the queue and the idempotency. The code skips the `s3:TestEvent` message S3 sends when you create the notification, and it returns `batchItemFailures`, so only the broken message of a batch goes back to the queue, not all 5.
+> **Note**: `STATE_MACHINE_ARN` is left out on purpose: the state machine does not exist yet (layer 4), and the code treats a missing value as "no state machine". Until then the function only *claims* the file and logs it, which is enough to test the queue and the idempotency. The code skips the `s3:TestEvent` message S3 sends when you create the notification, and it returns `batchItemFailures`, so only the broken message of a batch goes back to the queue, not all 5.
 
 ### Step 5: Connect the queue to the Lambda
 
@@ -310,7 +311,7 @@ Next → name `lks-libinc-workflow-<suffix>` → **Permissions: Choose an existi
 
 ### Step 4: Let the dispatcher start the workflow
 
-Lambda `dispatcher` → **Configuration → Environment variables → Edit** → set `STATE_MACHINE_ARN` to the **ARN of your state machine** → Save.
+Lambda `dispatcher` → **Configuration → Environment variables → Edit → Add environment variable**: key `STATE_MACHINE_ARN`, value the **ARN of your state machine** (State machines page → click your machine → copy the ARN) → Save.
 
 > **Note**: Now the dispatcher calls `StartExecution`. The execution name is a hash of the file key: Step Functions refuses a second execution with the same name and input, which is a second layer of protection after the DynamoDB claim.
 
@@ -534,7 +535,7 @@ RDS and backups keep costing money until deleted. Delete in this order:
 
 ## Instructor appendix – the shared role `lks_learning_role`
 
-Students never edit IAM. Prepare the role once.
+Students never edit IAM. Prepare the role once. Each student account also needs permission to *use* the role: `iam:PassRole` on `lks_learning_role` (the console asks for it whenever a student picks the role for a Lambda function, state machine, schedule or backup). Without it the console answers "not authorized to perform iam:PassRole".
 
 **Trust relationship** (IAM → Roles → `lks_learning_role` → Trust relationships → Edit trust policy; also in `iam/lks_learning_role-trust.json`):
 
