@@ -36,15 +36,22 @@ def lambda_handler(event, context):
 
     approve = f"{API_BASE_URL}/approval?id={approval_id}&decision=APPROVE"
     reject = f"{API_BASE_URL}/approval?id={approval_id}&decision=REJECT"
+
+    def one_line(text, limit):
+        # reported text is untrusted: no line breaks, so it cannot fake extra lines or links
+        return " ".join(str(text).split())[:limit]
+
     sns.publish(
         TopicArn=TOPIC_ARN,
-        Subject=f"[CRITICAL] Approval needed: {incident['incident_id']}"[:100],
+        Subject=f"[CRITICAL] Approval needed: {one_line(incident['incident_id'], 40)}"[:100],
         Message=(
-            f"Critical incident {incident['incident_id']} in {incident['room']}\n"
-            f"{incident['description']}\n\n"
             f"Approve: {approve}\n"
-            f"Reject:  {reject}\n\n"
-            f"No answer within {WAIT_SECONDS // 60} minutes escalates automatically."
+            f"Reject:  {reject}\n"
+            f"No answer within {WAIT_SECONDS // 60} minutes escalates automatically.\n\n"
+            "Reported text (written by the reporter, not verified):\n"
+            f"  incident: {one_line(incident['incident_id'], 100)}\n"
+            f"  room:     {one_line(incident['room'], 100)}\n"
+            f"  details:  {one_line(incident['description'], 300)}"
         ),
     )
     return {"approval_id": approval_id}

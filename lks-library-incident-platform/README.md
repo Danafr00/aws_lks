@@ -186,6 +186,18 @@ Daily backup rule for the database kept for 7 days. Alarms on the DLQ (`Approxim
 
 ---
 
+## Known Limits (practice only)
+
+This module is built for learning and keeps the setup simple on purpose. Do not copy these shortcuts into a real system:
+
+- **The API has no authentication.** Anyone who knows the API address can check in a visitor, ask for an upload URL, list pending approvals and answer them. In production put an authorizer (Cognito, JWT or IAM) in front of `/upload-url`, `/approvals` and `/approval`, and limit approval to named approvers.
+- **Approving by link uses `GET`.** An e-mail link can only be opened, so the link changes state. The `approval_id` is a random 128-bit value that works like a password; a real system would add a signed, expiring token and a confirmation page that asks for a `POST`.
+- **An uploaded file can overwrite an incident with the same `incident_id`.** The workflow stores incidents with a plain `putItem`, so re-uploading is idempotent for the exercise. In production derive the key on the server (for example file key + id) or use a conditional write, and restrict the upload size with a presigned `POST` and `content-length-range`.
+- **Text from uploaded files is untrusted.** The approval page and the approval e-mail already escape or flatten it. Keep doing that for every new output you add.
+- **The database is open to the internet on port 3306**, and the shared role uses full-access policies.
+
+---
+
 ## Validation
 
 At the end you must demonstrate:

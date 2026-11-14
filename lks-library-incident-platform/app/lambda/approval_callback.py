@@ -1,3 +1,4 @@
+import html as htmllib
 import json
 import os
 import time
@@ -11,8 +12,12 @@ table = boto3.resource("dynamodb").Table(os.environ["APPROVALS_TABLE"])
 
 
 def html(status, title, message):
-    page = f"<html><body style='font-family:sans-serif;max-width:480px;margin:60px auto'><h2>{title}</h2><p>{message}</p></body></html>"
-    return {"statusCode": status, "headers": {"Content-Type": "text/html"}, "body": page}
+    # incident_id comes from an uploaded file, so it must be escaped before it goes into HTML
+    page = (
+        "<html><body style='font-family:sans-serif;max-width:480px;margin:60px auto'>"
+        f"<h2>{htmllib.escape(title)}</h2><p>{htmllib.escape(message)}</p></body></html>"
+    )
+    return {"statusCode": status, "headers": {"Content-Type": "text/html; charset=utf-8"}, "body": page}
 
 
 def js(status, body):
