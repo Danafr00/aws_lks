@@ -296,7 +296,7 @@ Console: **EC2 → Launch instance**
 
 ### B3. Test the app directly
 
-Open the instance's **Public IPv4 address**, then from your computer:
+Open the instance's **Public IPv4 address** (EC2 → Instances → your instance). Then open **CloudShell** (the `>_` icon in the top bar of the console; it is a terminal that is already signed in) and run:
 
 ```bash
 curl http://<PUBLIC-IP>:8080/health
@@ -306,7 +306,7 @@ curl -X POST http://<PUBLIC-IP>:8080/visitor -H 'Content-Type: application/json'
 
 Expected: `{"status":"ok"}`, then `{"message":"Visitor recorded","visitor_id":1}`. Check the row in your database client.
 
-> **Note**: Test the app **before** adding API Gateway, so a failure has only one possible place. No answer at all means the user data is still running or the security group lacks 8080. `500` means the app cannot reach RDS: check the database settings in the user data and port 3306 in the RDS security group. To read what the instance did at boot: **EC2 → instance → Actions → Monitor and troubleshoot → Get system log**.
+> **Note**: CloudShell runs inside AWS, so it reaches the instance the same way the API Gateway integration will. Test the app **before** adding API Gateway, so a failure has only one possible place. No answer at all means the user data is still running or the security group lacks 8080. `500` means the app cannot reach RDS: check the database settings in the user data and port 3306 in the RDS security group. To read what the instance did at boot: **EC2 → instance → Actions → Monitor and troubleshoot → Get system log**.
 
 ### B4. API Gateway in front of the instance
 
@@ -322,7 +322,7 @@ Console: **API Gateway → Create API → HTTP API → Build**
 
 ### B5. Frontend and final test
 
-Put the API Gateway URL (ending in `/visitor`) in `frontend/index.html` as `API_URL`, deploy it to Amplify like step 7, and submit the form. Or test the API first:
+Put the API Gateway URL (ending in `/visitor`) in `frontend/index.html` as `API_URL`, deploy it to Amplify like step 7, and submit the form. Or test the API first from CloudShell:
 
 ```bash
 curl -X POST https://<API-ID>.execute-api.<REGION>.amazonaws.com/visitor \
