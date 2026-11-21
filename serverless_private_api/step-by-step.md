@@ -2,7 +2,7 @@
 
 You build a small API whose database is **not reachable from the internet**. You create every network piece yourself in the console (VPC, subnets, gateways, route tables, security groups), so you see what each one does. Every action is followed by a **Note** that says what it does and why.
 
-You build it in 7 layers (plus an optional break-it lab). Each layer adds one idea and ends with a **checkpoint**. Do not start the next layer before the checkpoint passes.
+You build it in 8 layers (plus an optional break-it lab). Each layer adds one idea and ends with a **checkpoint**. Do not start the next layer before the checkpoint passes.
 
 > The same architecture is also available as one CloudFormation template (`template.yaml`, `scripts/deploy.sh`). Use the template when you want it built in minutes; use this guide to learn why each piece exists.
 
@@ -17,6 +17,7 @@ You build it in 7 layers (plus an optional break-it lab). Each layer adds one id
 | **5** | Bastion host | You reach the database from the bastion |
 | **6** | Lambda inside the VPC | A test event returns `200` and reads the table |
 | **7** | HTTP API in front of the Lambda | `curl` can create, list and delete items |
+| **8** | Explore the database from your computer (DBeaver through the bastion) | You `SELECT` the items the API created, and roll back a `DELETE` |
 
 ## Architecture
 
@@ -115,9 +116,14 @@ Console: **VPC → Route tables → Create route table**: Name `lks-public-rt-<s
 
 ### Step 1: Create the NAT gateway
 
-Console: **VPC → NAT gateways → Create NAT gateway**: Name `lks-nat-<suffix>`, Subnet **`lks-public-1-<suffix>`**, Connectivity type **Public**, **Allocate Elastic IP** → Create. Wait until the status is **Available** (about 2 minutes).
+Console: **VPC → NAT gateways → Create NAT gateway**: Name `lks-nat-<suffix>`, Connectivity type **Public**, and:
 
-> **Note**: A NAT gateway lets private servers go **out**: it replaces their private address with its own public address (the Elastic IP) and sends the answer back to them. Nobody outside can start a connection **in** through it. It must live in a **public** subnet because it needs the internet gateway itself. It is billed per hour, so do not forget it.
+- **Zonal** (the classic type): Subnet **`lks-public-1-<suffix>`**, **Allocate Elastic IP**; or
+- **Regional** (if the console offers an *Availability mode*): you pick the VPC and no subnet; AWS spreads it over the zones for you.
+
+→ Create. Wait until the status is **Available** (about 2 minutes). **Do not edit the private route table before the status is Available.**
+
+> **Note**: A NAT gateway lets private servers go **out**: it replaces their private address with its own public address (the Elastic IP) and sends the answer back to them. Nobody outside can start a connection **in** through it. A zonal one must live in a **public** subnet because it needs the internet gateway itself; a regional one needs no subnet but does need the internet gateway attached to the VPC. Either way it is billed per hour, so do not forget it. A route that points at a NAT gateway that is still *Pending* is shown as **blackhole**; once the gateway is *Available* the route turns **active** (reload the page).
 
 ### Step 2: Create the private route table
 
@@ -126,7 +132,8 @@ Console: **VPC → Route tables → Create route table**: Name `lks-private-rt-<
 > **Note**: Same idea as the public table, one difference: the "everything else" route points at the NAT gateway, not at the internet gateway. That one difference is what separates *public* from *private*. This is also why Lambda will be able to reach Secrets Manager later: Secrets Manager is a public AWS service, and a Lambda inside the VPC has no other way out.
 
 **Layer 2 checkpoint — verify before continuing:**
-- [ ] The NAT gateway is **Available** and sits in `lks-public-1`
+- [ ] The NAT gateway is **Available** (a zonal one sits in `lks-public-1`)
+- [ ] `lks-private-rt` shows the route as **active**, not *blackhole*
 - [ ] `lks-private-rt` shows `0.0.0.0/0 → nat-…` and two associated subnets
 
 ---
@@ -235,10 +242,10 @@ Console: **EC2 → Launch instance**
 | Name | `lks-bastion-<suffix>` |
 | AMI | Amazon Linux 2023 |
 | Instance type | `t3.micro` |
-| Key pair | **Proceed without a key pair** |
+| Key pair | **Create new key pair**: name `lks-bastion-key-<suffix>`, type **RSA**, format **.pem** → Create key pair (the file downloads: keep it) |
 | Network settings → Edit | VPC `lks-vpc-<suffix>`, Subnet **`lks-public-1-<suffix>`**, Auto-assign public IP **Enable**, Security group **Select existing** → `lks-bastion-sg-<suffix>` |
 
-> **Note**: A *bastion host* (jump box) is the one door into a private network: it sits in a **public** subnet, so you can reach it, and it can reach the private subnets, so it reaches the database. Without a key pair you log in through *EC2 Instance Connect* from the browser, which is why the SSH rule on its security group is open.
+> **Note**: A *bastion host* (jump box) is the one door into a private network: it sits in a **public** subnet, so you can reach it, and it can reach the private subnets, so it reaches the database. You can log in through *EC2 Instance Connect* from the browser (used in the next step), and with the key pair from your own computer: layer 8 needs the `.pem` file so DBeaver can open an SSH tunnel. If you already launched the bastion without a key pair you cannot add one later: terminate it and launch it again (nothing is stored on it). The SSH rule on its security group is open for both ways.
 
 ### Step 2: Connect and test the database from inside
 
@@ -356,6 +363,102 @@ curl -s -X DELETE $API/items/999
 
 ---
 
+## Layer 8 – Explore the database from your computer (DBeaver through the bastion)
+
+> **What you build**: a connection from DBeaver on your computer to the **private** database, using the bastion as the only way in, so you can run `SELECT`, `INSERT`, `UPDATE` and `DELETE` like a real database administrator.
+
+You need: the bastion's **public IPv4 address** (EC2 → Instances), the `.pem` key file from layer 5, the **RDS endpoint**, and the database password (**Secrets Manager → the `rds!db-` secret → Retrieve secret value → password**). Install **DBeaver** (the free Community edition) if you do not have it.
+
+### Step 1: Create the connection with an SSH tunnel
+
+In DBeaver: **Database → New Database Connection → MySQL → Next**.
+
+- **Main** tab: Server Host = the **RDS endpoint**, Port `3306`, Database `lksdb`, Username `admin`, Password = the password from Secrets Manager.
+- **SSH** tab: tick **Use SSH Tunnel**, Host/IP = the **bastion's public IPv4**, Port `22`, User Name `ec2-user`, Authentication Method **Public Key**, Private Key = your `.pem` file → press **Test tunnel configuration**.
+- **Driver properties** tab: set `allowPublicKeyRetrieval` = `true`.
+- Press **Test Connection**, then **Finish**.
+
+> **Note**: DBeaver cannot reach the database directly: it has no route to a private address. Instead it opens an **SSH tunnel** to the bastion (the only door in, port 22), and the bastion forwards the database traffic to the endpoint on port 3306 from **inside** the VPC. To the database the connection looks like it comes from the bastion, which is exactly what the `lks-rds-sg` rule (3306 from `lks-bastion-sg`) allows. The database itself is still **not** public. MySQL 8 logs in with `caching_sha2_password`, and without SSL the client must ask the server for its public key: DBeaver refuses by default with `Public Key Retrieval is not allowed`, and `allowPublicKeyRetrieval=true` fixes that. The tunnel already encrypts everything on the way, so `useSSL` can stay at its default. If *Test tunnel configuration* fails, the problem is the bastion (address, key file, port 22 rule). If the tunnel works and *Test Connection* times out, the problem is the 3306 rule.
+
+### Step 2: Look around
+
+Open a SQL editor (**SQL Editor → New SQL script**, or `Ctrl+]`) and run the statements one at a time (`Ctrl+Enter` runs the line your cursor is on):
+
+```sql
+SHOW DATABASES;
+USE lksdb;
+SHOW TABLES;
+DESCRIBE items;
+SHOW CREATE TABLE items;
+```
+
+> **Note**: `DESCRIBE` lists the columns and their types; `SHOW CREATE TABLE` prints the exact statement that built the table, which is how you read a table you did not make (the Lambda created `items` the first time it ran). In the left panel you can also expand *Databases → lksdb → Tables → items* and open the **Data** tab to see the rows in a grid.
+
+### Step 3: Read data with `SELECT`
+
+First put some data in through the API (CloudShell, with your `$API`):
+
+```bash
+curl -s -X POST $API/items -H 'Content-Type: application/json' -d '{"name":"pen","value":"blue"}'
+curl -s -X POST $API/items -H 'Content-Type: application/json' -d '{"name":"book","value":"physics"}'
+curl -s -X POST $API/items -H 'Content-Type: application/json' -d '{"name":"pencil","value":"HB"}'
+```
+
+Then in DBeaver:
+
+```sql
+SELECT * FROM items;
+SELECT name, value FROM items WHERE name LIKE 'pen%';
+SELECT * FROM items ORDER BY created_at DESC LIMIT 2;
+SELECT COUNT(*) AS total FROM items;
+SELECT DATE(created_at) AS day, COUNT(*) AS total FROM items GROUP BY DATE(created_at);
+```
+
+> **Note**: This is the data your API wrote through the Lambda: the browser, API Gateway, Lambda and the private database form one chain, and here you read the last link directly. `WHERE` filters rows, `ORDER BY … LIMIT` takes the newest ones, `COUNT` and `GROUP BY` summarise. `LIKE 'pen%'` matches `pen` and `pencil`, because `%` means "anything".
+
+### Step 4: Change data with `INSERT`, `UPDATE` and `DELETE`
+
+```sql
+INSERT INTO items (name, value) VALUES ('ruler', '30 cm');
+UPDATE items SET value = 'red' WHERE name = 'pen';
+DELETE FROM items WHERE name = 'ruler';
+```
+
+Then in CloudShell: `curl -s $API/items`.
+
+> **Note**: The API now shows exactly what you changed in the database, because they share the same table. **Always write a `WHERE` on `UPDATE` and `DELETE`**: without it they apply to **every row**, and DBeaver's default *Auto-commit* mode saves the change at once, with no undo.
+
+### Step 5: Roll back a mistake
+
+In the toolbar switch **Auto-commit** to **Manual commit** (the transaction mode button). Then run:
+
+```sql
+DELETE FROM items;
+SELECT COUNT(*) AS total FROM items;
+```
+
+The count is `0`. Now press **Rollback** in the toolbar and run the `SELECT COUNT(*)` again. Switch back to **Auto-commit** when you are done.
+
+> **Note**: In manual mode your changes live in an open *transaction*: you see them, other connections do not, and nothing is permanent until you press **Commit**. **Rollback** throws them away, so the rows are back. This is the safety net against the "forgot the `WHERE`" mistake, and it is why the Lambda calls `conn.commit()` after every change.
+
+### Step 6: See who is connected
+
+```sql
+SELECT USER(), CURRENT_USER(), @@hostname;
+SELECT id, user, host, db, command, time FROM information_schema.processlist;
+```
+
+> **Note**: The `host` column shows the **private addresses** of whoever is connected: your own session arrives from the bastion (a `10.0.1.x` address in the public subnet, because of the tunnel), and while the function is warm you may also see the Lambda (a `10.0.10.x` or `10.0.11.x` address in a private subnet). No address from the internet appears anywhere: that list is the proof that the database is reachable only from inside the VPC.
+
+**Layer 8 checkpoint — verify before continuing:**
+- [ ] *Test tunnel configuration* and *Test Connection* both succeed
+- [ ] `SELECT * FROM items` shows the three items you created with `curl`
+- [ ] After step 4, `curl -s $API/items` shows the new `value` of `pen` and no `ruler`
+- [ ] In step 5 the count is `0` before the rollback and `3` after it
+- [ ] The `host` column in step 6 shows only `10.0.x.x` addresses
+
+---
+
 ## Optional – Break it on purpose
 
 Learn what each piece does by removing it.
@@ -375,7 +478,7 @@ Delete in this order the **same day** (NAT gateway and RDS cost money):
 
 1. **API Gateway** → select the API → Actions → Delete
 2. **Lambda** → delete `lks-items-<suffix>` and the layer (all versions)
-3. **EC2** → terminate `lks-bastion-<suffix>`
+3. **EC2** → terminate `lks-bastion-<suffix>`, then **Key pairs** → delete `lks-bastion-key-<suffix>` (and delete the `.pem` file from your computer)
 4. **RDS** → delete the database (untick *Create final snapshot*, tick *Delete automated backups*), then **Subnet groups** → delete `lks-db-subnets-<suffix>`
 5. **Secrets Manager** → the managed secret is deleted with the database; check that it is gone
 6. **VPC → NAT gateways** → delete `lks-nat-<suffix>`, wait until it is **Deleted**, then **Elastic IPs** → release its address
