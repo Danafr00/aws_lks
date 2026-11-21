@@ -2,6 +2,8 @@
 
 A serverless CRUD API built with AWS Lambda, API Gateway, and RDS MySQL — all inside a private VPC. Built for LKS (Lomba Kompetensi Siswa) competition practice.
 
+> **Two ways to build it.** `step-by-step.md` walks you through building the whole network by hand in the AWS console, with a Note after every action (best for learning). `template.yaml` and `scripts/deploy.sh` build the same architecture in one go with CloudFormation.
+
 ## Architecture
 
 ```mermaid
@@ -119,6 +121,9 @@ mysql -h 127.0.0.1 -P 3307 -u admin -p lksdb
 ```
 serverless_private_api/
 ├── template.yaml        ← CloudFormation IaC (VPC, RDS, Lambda, API GW, Bastion)
+├── step-by-step.md      ← Manual build in the AWS console (VPC by hand)
+├── lambda/
+│   └── lambda_function.py   ← Function used by the manual build (HTTP API events)
 ├── README.md
 └── scripts/
     ├── deploy.sh        ← Deploy the CloudFormation stack
